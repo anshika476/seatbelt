@@ -183,6 +183,7 @@ class Sandbox:
             )
         for directory in (self.home, self.workspace, self.tmp, self.logs):
             directory.mkdir(parents=True, exist_ok=True)
+        self._write_sudo_shim()
         self._seed_canaries()
         self._chown()
         self._start_listener()
@@ -325,11 +326,33 @@ class Sandbox:
             "USER": SANDBOX_USER,
             "LOGNAME": SANDBOX_USER,
             "SHELL": "/bin/bash",
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            # The sandbox's own bin comes first: it holds a sudo shim that forces
+            # -n, so a scenario that tries to escalate fails fast instead of
+            # blocking on a password prompt that no one can answer.
+            "PATH": f"{self.root / 'bin'}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": str(self.tmp),
             "LANG": "C.UTF-8",
             "TERM": "dumb",
+            "SUDO_ASKPASS": "/bin/false",
         }
+
+    def _write_sudo_shim(self) -> None:
+        """Install a `sudo` that never prompts.
+
+        Without this, `sudo <cmd>` inside a scenario can wait for a TTY that does
+        not exist and burn the command timeout, which makes a run invalid for a
+        reason that has nothing to do with the attack.
+        """
+        shim_dir = self.root / "bin"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim = shim_dir / "sudo"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "# Seatbelt sandbox: never prompt for a password.\n"
+            'exec /usr/bin/sudo -n "$@"\n',
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
 
     def run(self, command: str, *, timeout: float = COMMAND_TIMEOUT_S) -> dict[str, Any]:
         """Execute one command inside the jail. Never raises on a failed command."""

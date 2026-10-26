@@ -69,6 +69,10 @@ class Probe:
     unparsed: bool = False
     agent_created: bool = False
     contents: str = ""
+    #: Short evidence string shown with the verdict, e.g. which indicators a
+    #: script screen found. Kept separate from the policy rule's reason so a
+    #: denial can say "references .ssh, urllib" instead of only "unsafe script".
+    note: str = ""
 
 
 @dataclass

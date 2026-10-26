@@ -136,6 +136,16 @@ rules:
     decision: ask
     reason: executing a file this session created
 
+  - id: shell.script_unsafe
+    match: {kind: shell, detail: [script-unsafe]}
+    decision: ask
+    reason: script contents reference credentials, network or dynamic execution
+
+  - id: shell.script_unreadable
+    match: {kind: shell, detail: [script-unreadable]}
+    decision: ask
+    reason: script could not be read or screened, so it cannot be vouched for
+
   - id: shell.agent_created_clean
     match:
       kind: shell
@@ -143,6 +153,11 @@ rules:
       allow_agent_created: true
     decision: allow
     reason: clean session, and the script contains no egress
+
+  - id: shell.script_screened
+    match: {kind: shell, detail: [script-screened]}
+    decision: allow
+    reason: pre-existing script whose current contents pass the screen
 
   - id: shell.unparsed
     match: {kind: shell, detail: [unparsed]}
@@ -221,14 +236,6 @@ rules:
       flags_all: ["^-m$", "^(pytest|unittest|compileall)$"]
     decision: allow
     reason: python module entry point for a known tool
-
-  - id: shell.python_script
-    match:
-      kind: shell
-      command: [python, python3, node]
-      flags_none: ["^-c$", "^-e$", "^--eval$", "^-m$", "^-p$"]
-    decision: allow
-    reason: running a script file, not inline code
 
   - id: shell.http_client
     match: {kind: shell, command: [curl, wget]}

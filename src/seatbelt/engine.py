@@ -21,7 +21,14 @@ from urllib.parse import urlsplit
 
 from .action import Action, ToolKind
 from .policy import Decision, EvalContext, Policy, Probe, Verdict
-from .shellparse import Command, ParseResult, flatten, parse, pipes_into_shell
+from .shellparse import (
+    SHELLS,
+    Command,
+    ParseResult,
+    flatten,
+    parse,
+    pipes_into_shell,
+)
 
 #: Interpreters that can execute code handed to them directly.
 INTERPRETERS = frozenset(
@@ -96,6 +103,114 @@ def looks_inert(contents: str) -> bool:
         return False
     lowered = contents.lower()
     return not any(indicator in lowered for indicator in EGRESS_INDICATORS)
+
+
+#: What a pre-existing script must not contain before it may run.
+#:
+#: Narrower than ``EGRESS_INDICATORS`` on purpose: a pre-existing script that
+#: opens a workspace file is ordinary code, while one that reaches for ``~/.ssh``,
+#: posts over the network, reads the environment wholesale or evaluates a dynamic
+#: string is not. The point of the screen is to answer "could this script move a
+#: credential off the machine", not "does it touch the filesystem".
+SCRIPT_SCREEN_INDICATORS = (
+    # Credential locations, including the ways a script builds them at runtime.
+    ".ssh",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    ".aws",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    ".env",
+    "expanduser",
+    "path.home",
+    "os.getenv",
+    "os.environ",
+    # Network primitives.
+    "urllib",
+    "requests",
+    "httpx",
+    "http.client",
+    "urlopen",
+    "socket",
+    "curl",
+    "wget",
+    "subprocess",
+    "check_output",
+    "check_call",
+    "popen",
+    "os.system",
+    # Encoding a payload is the first step of getting it out.
+    "base64",
+    "b64encode",
+    "b64decode",
+    "hexlify",
+    # Dynamic execution, i.e. a payload we cannot read.
+    "eval(",
+    "exec(",
+)
+
+#: Files larger than this are asked about rather than parsed.
+MAX_SCREEN_BYTES = 256 * 1024
+
+#: Interpreter flags that consume the following argument, so the flag's value is
+#: not mistaken for the script path.
+INTERPRETER_VALUE_FLAGS = {"-W", "-X", "-Q", "--require"}
+
+#: Interpreter flags that mean "run this string or module, not a file".
+INTERPRETER_NO_SCRIPT_FLAGS = frozenset(
+    {"-c", "-m", "-e", "-E", "--eval", "-p", "--print", "-r"}
+)
+
+#: Directories whose contents are system commands, not project scripts.
+SYSTEM_BIN_PREFIXES = (
+    "/bin/",
+    "/sbin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/usr/local/bin/",
+)
+
+
+def screen_script(path: str) -> tuple[str, str]:
+    """Read a pre-existing script and decide whether it may run.
+
+    Returns ``(status, reason)`` with status ``ok``, ``unsafe`` or ``unreadable``.
+    Every failure mode is ``unreadable`` and therefore a question: a script we
+    cannot read is a script we cannot vouch for.
+    """
+    if not os.path.isfile(path):
+        return "unreadable", "not a regular file"
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_SCREEN_BYTES:
+            return "unreadable", f"larger than {MAX_SCREEN_BYTES} bytes"
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_SCREEN_BYTES + 1)
+    except OSError as exc:
+        return "unreadable", f"cannot read: {exc.strerror or exc}"
+
+    if b"\x00" in raw:
+        return "unreadable", "binary content"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "unreadable", "not UTF-8 text"
+
+    lowered = text.lower()
+    hits = sorted({indicator for indicator in SCRIPT_SCREEN_INDICATORS if indicator in lowered})
+    if hits:
+        return "unsafe", "references " + ", ".join(hits[:4])
+
+    if path.endswith(".py"):
+        try:
+            compile(text, path, "exec")
+        except SyntaxError as exc:
+            return "unreadable", f"not valid Python: {exc.msg}"
+
+    return "ok", ""
 
 
 #: Commands that put data on the wire. Used only to decide whether a shell
@@ -255,6 +370,26 @@ def _last_non_flag(args: Iterable[str]) -> str | None:
 def _first_non_flag(args: Iterable[str]) -> str | None:
     values = _non_flags(args)
     return values[0] if values else None
+
+
+def _first_positional(args: Iterable[str], value_flags: Iterable[str] = ()) -> str | None:
+    """First argument that is not a flag, skipping values of value-taking flags."""
+    tokens = list(args)
+    with_value = set(value_flags)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            if "=" not in token and token in with_value:
+                index += 2
+                continue
+            index += 1
+            continue
+        return token
+    return None
 
 
 def _is_write_redirect(op: str) -> bool:
@@ -613,22 +748,16 @@ class Engine:
             return []
 
         probes: list[Probe] = []
-        # Placed first so that when a verdict is a tie, "this is a file the
-        # session created" explains the outcome rather than the generic command
-        # rule that happens to be checked first.
-        agent_probes = self._agent_created_probes(name, argv, command, downloads)
-        probes.extend(agent_probes)
-        # A clean-session script has already been judged on what it contains.
-        # The generic "unknown command" probe would then veto it with a default
-        # ask, which is how `./script.sh` failed while `python3 script.py` did
-        # not. When a specific rule describes the command, the generic one is
-        # redundant rather than a second opinion.
-        clean_script = any(p.detail == "agent-created-clean" for p in agent_probes)
+        # Placed first so that when a verdict is a tie, "this is a script we
+        # screened" explains the outcome rather than the generic command rule.
+        script_probes = self._script_probes(name, argv, downloads)
+        probes.extend(script_probes)
+        clean_script = any(p.detail == "agent-created-clean" for p in script_probes)
 
         chmod_probes = self._chmod_probes(name, argv)
         probes.extend(chmod_probes)
 
-        if not clean_script and not chmod_probes:
+        if not clean_script and not chmod_probes and not script_probes:
             probes.append(Probe(ToolKind.SHELL, name, argv=argv, detail="command"))
 
         if name in INTERPRETERS and _has_inline_flag(name, argv):
@@ -725,56 +854,90 @@ class Engine:
             probes.append(Probe(ToolKind.FILE_WRITE, resolved, detail=detail, resolved=resolved))
         return probes
 
-    def _agent_created_probes(
+    def _script_probes(
         self,
         name: str,
         argv: tuple[str, ...],
-        command: Command,
         downloads: set[str] | None = None,
     ) -> list[Probe]:
-        """Flag execution of a file this session wrote or downloaded.
+        """Decide a script run on provenance plus contents.
 
-        A script the agent just created is exactly the shape of a
-        download-and-run chain, so running one is a question even when the path
-        is ordinary.
+        Two ways a script may run:
+
+        1. **The session created it.** Its contents were captured at write time,
+           so the screen runs on exactly what was written. A clean session and
+           inert contents allow it; taint, a credential read, or anything that
+           could move data asks.
+        2. **It already existed.** Its *current* contents are read and screened
+           now. This is the case that regressed: `python3 tools/bootstrap.py` is
+           not the agent's file, and nothing had looked inside it.
+
+        Anything else — unreadable, oversized, binary, unparseable — asks.
         """
-        available = set(self.ctx.created_files) | (downloads or set())
-        candidates: list[str] = []
-        if argv and ("/" in argv[0] or argv[0].startswith(".")):
-            candidates.append(argv[0])
-        if name in {"bash", "sh", "zsh", "dash"} and "-c" not in argv and len(argv) > 1:
-            candidates.append(argv[1])
-        if name in INTERPRETERS and not _has_inline_flag(name, argv):
-            # ``python3 exfil.py`` runs a file the agent may have just written.
-            # Without this, dropping a script and running it is a free pass past
-            # the agent-created check, which only looked at argv[0].
-            script = _first_non_flag(argv[1:])
-            if script:
-                candidates.append(script)
+        candidate = self._script_path(name, argv)
+        if candidate is None:
+            return []
 
-        probes: list[Probe] = []
-        for candidate in candidates:
-            resolved, _ = resolve_path(candidate, self.ctx)
-            if resolved and resolved in available:
-                # A clean session may run its own small scripts. Anything that
-                # can reach the network or a credential still asks, and a session
-                # that has read untrusted text or a secret loses the allowance.
-                contents = self.ctx.created_contents.get(resolved, "")
-                detail = (
-                    "agent-created-clean"
-                    if self.ctx.clean_session and looks_inert(contents)
-                    else "agent-created"
+        resolved, _ = resolve_path(candidate, self.ctx)
+        if resolved is None:
+            return [
+                Probe(
+                    ToolKind.SHELL,
+                    candidate,
+                    argv=argv,
+                    detail="script-unreadable",
+                    unparsed=True,
                 )
-                probes.append(
-                    Probe(
-                        ToolKind.SHELL,
-                        candidate,
-                        argv=argv,
-                        detail=detail,
-                        agent_created=True,
-                    )
+            ]
+
+        produced = set(self.ctx.created_files) | (downloads or set())
+        if resolved in produced or resolved in (downloads or set()):
+            contents = self.ctx.created_contents.get(resolved, "")
+            detail = (
+                "agent-created-clean"
+                if self.ctx.clean_session and looks_inert(contents)
+                else "agent-created"
+            )
+            return [
+                Probe(
+                    ToolKind.SHELL,
+                    candidate,
+                    argv=argv,
+                    detail=detail,
+                    agent_created=True,
                 )
-        return probes
+            ]
+
+        status, reason = screen_script(resolved)
+        detail = {
+            "ok": "script-screened",
+            "unsafe": "script-unsafe",
+        }.get(status, "script-unreadable")
+        return [
+            Probe(
+                ToolKind.SHELL,
+                candidate,
+                argv=argv,
+                detail=detail,
+                note=f"{candidate}: {reason}" if reason else "",
+            )
+        ]
+
+    def _script_path(self, name: str, argv: tuple[str, ...]) -> str | None:
+        """The file a command will execute as a script, if it executes one."""
+        if name in SHELLS and "-c" not in argv and len(argv) > 1:
+            return argv[1]
+        if name in INTERPRETERS:
+            if any(token in INTERPRETER_NO_SCRIPT_FLAGS for token in argv[1:]):
+                # -c/-e run a string, -m runs a module: not a file to screen.
+                return None
+            return _first_positional(argv[1:], INTERPRETER_VALUE_FLAGS)
+        if argv and ("/" in argv[0] or argv[0].startswith(".")):
+            resolved, _ = resolve_path(argv[0], self.ctx)
+            # `/bin/rm` is a system command with a path, not a project script.
+            if resolved and not resolved.startswith(SYSTEM_BIN_PREFIXES):
+                return argv[0]
+        return None
 
     def _path_probes(self, raw: str, detail: str) -> list[Probe]:
         resolved, note = resolve_path(raw, self.ctx)
@@ -832,11 +995,14 @@ class Engine:
         winner_probe, winner_verdict = evaluated[winner_index]
         # Name the thing that matched. "a secret appears in outbound data" is
         # useless in an audit record; "env:AWS_SECRET_ACCESS_KEY" is not.
-        if winner_probe.target.startswith(
+        suffix = winner_probe.note
+        if not suffix and winner_probe.target.startswith(
             ("secret:", "secret-file:", "tainted:", "agent-created:")
         ):
+            suffix = winner_probe.target
+        if suffix:
             winner_verdict = replace(
                 winner_verdict,
-                reason=f"{winner_verdict.reason} [{winner_probe.target}]",
+                reason=f"{winner_verdict.reason} [{suffix}]",
             )
         return Evaluation(winner_verdict, tuple(evaluated))

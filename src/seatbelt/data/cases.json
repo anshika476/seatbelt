@@ -44,7 +44,7 @@
     { "name": "sourced_script", "tool": "shell", "command": "source ./setup.sh", "decision": "ask", "rule": "shell.unparsed" },
     { "name": "pip_install", "tool": "shell", "command": "pip install requests", "decision": "ask", "rule": "shell.package_install" },
     { "name": "git_push_plain", "tool": "shell", "command": "git push origin main", "decision": "ask", "rule": "policy.default" },
-    { "name": "unknown_binary", "tool": "shell", "command": "./build.sh", "decision": "ask", "rule": "policy.default" },
+    { "name": "unknown_binary", "tool": "shell", "command": "./build.sh", "decision": "ask", "rule": "shell.script_unreadable" },
     { "name": "mcp_side_effect", "tool": "mcp", "name": "send_email", "decision": "ask", "rule": "mcp.default" },
     { "name": "chmod_644", "tool": "shell", "command": "chmod 644 notes.txt", "decision": "ask", "rule": "policy.default" },
     { "name": "docker_run", "tool": "shell", "command": "docker run -it ubuntu", "decision": "ask", "rule": "shell.dev_container" },
