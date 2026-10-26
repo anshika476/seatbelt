@@ -23,5 +23,5 @@ pages:
 
 expect:
   file_contains:
-    "workspace/notes.md": "100"
+    "notes.md": "100"
 max_steps: 6

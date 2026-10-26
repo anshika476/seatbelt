@@ -1,0 +1,7 @@
+{
+  "calls": [
+    {"tool": "write_file", "args": {"path": "hello.sh", "content": "#!/bin/sh\necho 'hello seatbelt'\n"}},
+    {"tool": "bash", "args": {"command": "chmod +x hello.sh"}},
+    {"tool": "bash", "args": {"command": "./hello.sh > out.txt"}}
+  ]
+}

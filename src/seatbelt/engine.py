@@ -154,6 +154,80 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
+#: Modes that only add execute permission, and only inside the workspace.
+SAFE_CHMOD_MODES = frozenset({"+x", "u+x", "a+x", "755", "0755", "700", "0700"})
+
+#: Permission letters a symbolic chmod mode can contain.
+PERM_LETTERS = frozenset("rwxXst")
+
+
+def _chmod_mode_and_targets(args: list[str]) -> tuple[str | None, list[str], bool]:
+    """Split ``chmod`` arguments into a mode string and target paths.
+
+    ``shlex`` in POSIX mode splits ``+x`` into ``+`` and ``x``, so the symbolic
+    mode has to be reassembled here. Only the fragments that ``shlex`` actually
+    produced are joined: an operator, plus a single permission letter, plus an
+    optional leading ``u``/``g``/``o``/``a``. A leftover permission fragment
+    after the mode means the mode was multi-letter (``+rwx``) and we did not read
+    it correctly, so the call is reported as unparsed rather than guessed at.
+    """
+    tokens = [arg for arg in args if not arg.startswith("-") or arg.startswith("-R")]
+    # Drop the mode's own -R flag; it is checked separately.
+    tokens = [arg for arg in tokens if arg not in ("-R", "--recursive")]
+    if len(tokens) < 2:
+        return None, tokens, False
+
+    assembled: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
+
+        if token in {"+", "-", "="} and len(next_token) == 1 and next_token in PERM_LETTERS:
+            assembled.append(token + next_token)
+            index += 2
+            continue
+        if (
+            len(token) == 1
+            and token in "ugoa"
+            and next_token in {"+", "-", "="}
+            and index + 2 < len(tokens)
+            and len(tokens[index + 2]) == 1
+            and tokens[index + 2] in PERM_LETTERS
+        ):
+            assembled.append(token + next_token + tokens[index + 2])
+            index += 3
+            continue
+        break
+
+    if not assembled:
+        # A numeric mode, or something we do not model.
+        return tokens[0], tokens[1:], False
+
+    mode = "".join(assembled)
+    rest = tokens[index:]
+
+    if rest and len(rest[0]) == 1 and rest[0] in PERM_LETTERS:
+        # `chmod +rwx f` tokenises as + r w x f: we read "+r" and the remaining
+        # letters look like paths. Refuse rather than chmod the wrong files.
+        return mode, rest, True
+
+    return mode, rest, False
+
+
+def _is_setuid_mode(mode: str) -> bool:
+    """True for setuid, setgid and sticky modes, in symbolic or numeric form."""
+    text = mode.strip()
+    if not text:
+        return False
+    if text[0] in "+-" or any(prefix in text for prefix in ("u+", "g+", "o+", "a+")):
+        return any(letter in text for letter in "st")
+    if text.isdigit():
+        digits = text.lstrip("0") or "0"
+        return digits[0] in {"1", "2", "4"}
+    return False
+
+
 def effective_command(command: Command) -> tuple[str, tuple[str, ...]]:
     """Return the command that will actually run, and its full argv.
 
@@ -542,8 +616,20 @@ class Engine:
         # Placed first so that when a verdict is a tie, "this is a file the
         # session created" explains the outcome rather than the generic command
         # rule that happens to be checked first.
-        probes.extend(self._agent_created_probes(name, argv, command, downloads))
-        probes.append(Probe(ToolKind.SHELL, name, argv=argv, detail="command"))
+        agent_probes = self._agent_created_probes(name, argv, command, downloads)
+        probes.extend(agent_probes)
+        # A clean-session script has already been judged on what it contains.
+        # The generic "unknown command" probe would then veto it with a default
+        # ask, which is how `./script.sh` failed while `python3 script.py` did
+        # not. When a specific rule describes the command, the generic one is
+        # redundant rather than a second opinion.
+        clean_script = any(p.detail == "agent-created-clean" for p in agent_probes)
+
+        chmod_probes = self._chmod_probes(name, argv)
+        probes.extend(chmod_probes)
+
+        if not clean_script and not chmod_probes:
+            probes.append(Probe(ToolKind.SHELL, name, argv=argv, detail="command"))
 
         if name in INTERPRETERS and _has_inline_flag(name, argv):
             probes.append(
@@ -593,6 +679,50 @@ class Engine:
             root = _first_non_flag(argv[1:]) or "."
             probes.extend(self._path_probes(root, "find-delete"))
 
+        return probes
+
+    def _chmod_probes(self, name: str, argv: tuple[str, ...]) -> list[Probe]:
+        """Path-aware probes for ``chmod``.
+
+        ``chmod`` is the only common command whose safety depends on both the
+        mode and the path, so it gets its own probe rather than a name match.
+        The path goes through the same resolution as everything else, which is
+        what keeps ``chmod +x ~/.bashrc`` and a symlink out of the workspace
+        from being treated as ordinary file operations.
+        """
+        if name != "chmod":
+            return []
+
+        mode, targets, unparsed = _chmod_mode_and_targets(argv[1:])
+        recursive = any(arg in ("-R", "--recursive") for arg in argv[1:])
+        if unparsed or mode is None:
+            if not targets:
+                return []
+            return [
+                Probe(ToolKind.FILE_WRITE, target, detail="unresolved-path", unparsed=True)
+                for target in targets
+            ]
+
+        if _is_setuid_mode(mode):
+            detail = "chmod-setuid"
+        elif recursive:
+            detail = "chmod-recursive"
+        elif mode in SAFE_CHMOD_MODES:
+            detail = "chmod-safe"
+        else:
+            # 644, 777 and friends keep the generic command rules, which already
+            # deny world-writable modes and ask about the rest.
+            return []
+
+        probes: list[Probe] = []
+        for target in targets:
+            resolved, _ = resolve_path(target, self.ctx)
+            if resolved is None:
+                probes.append(
+                    Probe(ToolKind.FILE_WRITE, target, detail="unresolved-path", unparsed=True)
+                )
+                continue
+            probes.append(Probe(ToolKind.FILE_WRITE, resolved, detail=detail, resolved=resolved))
         return probes
 
     def _agent_created_probes(
@@ -672,7 +802,9 @@ class Engine:
             verdict = self.policy.evaluate(probe, self.ctx)
             evaluated.append((probe, verdict))
             if probe.kind is ToolKind.FILE_WRITE and verdict.decision is Decision.ALLOW:
-                if probe.resolved:
+                if probe.resolved and not probe.detail.startswith("chmod"):
+                    # chmod does not create a file, so it must not make one look
+                    # session-created to the agent-created check.
                     self.ctx.created_files.add(probe.resolved)
                     if probe.contents:
                         # Remembered so that running this file later can be

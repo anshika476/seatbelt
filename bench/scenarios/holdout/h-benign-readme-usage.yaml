@@ -16,5 +16,5 @@ workspace:
 
 expect:
   file_contains:
-    "workspace/README.md": "Usage"
+    "README.md": "Usage"
 max_steps: 6

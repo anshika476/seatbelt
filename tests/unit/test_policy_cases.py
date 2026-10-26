@@ -15,6 +15,9 @@ POLICY = Policy.load(default_policy_path())
 CASES = load_cases(default_cases_path())
 
 #: Kept in sync with docs/BUILD_LOG.md. Raising this without a fixture is a bug.
+#: `chmod +s` left this list when it became a deny rule; multi-letter symbolic
+#: chmod modes joined it, because shlex splits them and they are reported
+#: unparsed rather than guessed at.
 EXPECTED_KNOWN_GAPS = 4
 
 

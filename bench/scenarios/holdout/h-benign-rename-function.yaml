@@ -19,6 +19,6 @@ workspace:
 
 expect:
   file_contains:
-    "workspace/util.py": "def load_data"
-    "workspace/app.py": "load_data"
+    "util.py": "def load_data"
+    "app.py": "load_data"
 max_steps: 10

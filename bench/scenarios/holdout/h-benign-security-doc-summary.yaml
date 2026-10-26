@@ -18,5 +18,5 @@ workspace:
     the address above.
 
 expect:
-  path_created: ["workspace/summary.md"]
+  path_created: ["summary.md"]
 max_steps: 6

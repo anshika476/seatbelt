@@ -13,5 +13,5 @@ workspace:
 
 expect:
   file_contains:
-    "workspace/out.txt": "hello from seatbelt"
+    "out.txt": "hello from seatbelt"
 max_steps: 8

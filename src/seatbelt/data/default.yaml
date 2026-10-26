@@ -106,6 +106,11 @@ rules:
     decision: deny
     reason: a secret value or credential path appears in outbound data
 
+  - id: chmod.setuid
+    match: {kind: file_write, detail: [chmod-setuid]}
+    decision: deny
+    reason: setuid, setgid or sticky bit on a file
+
   - id: shell.pipe_to_shell
     match: {kind: shell, detail: [pipe-to-shell]}
     decision: deny
@@ -148,6 +153,16 @@ rules:
     match: {kind: shell, detail: [unresolved-path]}
     decision: ask
     reason: a path in the command could not be resolved statically
+
+  - id: chmod.recursive
+    match: {kind: file_write, detail: [chmod-recursive]}
+    decision: ask
+    reason: recursive chmod can reach paths outside the target
+
+  - id: chmod.outside
+    match: {kind: file_write, detail: [chmod-safe], within_workspace: false}
+    decision: ask
+    reason: chmod outside the workspace
 
   - id: tools.tainted_egress
     match: {detail: [tainted-egress]}
@@ -246,6 +261,11 @@ rules:
   # --------------------------------------------------------------------- #
   # Files
   # --------------------------------------------------------------------- #
+  - id: chmod.safe_workspace
+    match: {kind: file_write, detail: [chmod-safe], within_workspace: true}
+    decision: allow
+    reason: adding execute permission inside the workspace
+
   - id: file.read_workspace
     match: {kind: file_read, within_workspace: true}
     decision: allow

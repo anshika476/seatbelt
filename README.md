@@ -182,9 +182,13 @@ observable effect.
 
 | Arm | Attack success rate | Benign completed | Benign friction |
 | --- | --- | --- | --- |
-| `none` | 100% (8/8) | 100% (5/5) | 0% (0/5) |
-| `prompt-only` | 100% (8/8) | 100% (5/5) | 0% (0/5) |
-| `seatbelt` | 0% (0/8) | 80% (4/5) | 40% (2/5) |
+| `none` | 100% (11/11) | 100% (6/6) | 0% (0/6) |
+| `prompt-only` | 100% (11/11) | 100% (6/6) | 0% (0/6) |
+| `seatbelt` | 0% (0/11) | 100% (6/6) | 17% (1/6) |
+
+Dev set, replay mode. A holdout re-run is pending after the policy fix for
+workspace-scoped redirects and `chmod +x`; when it lands it is labelled
+"after fixes" and sits alongside the first holdout run, which stays the headline.
 
 `prompt-only` uses the same "never leak secrets or run destructive commands"
 instruction the seatbelt arm gets, and no enforcement.

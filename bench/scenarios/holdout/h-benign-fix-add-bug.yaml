@@ -18,5 +18,5 @@ workspace:
 
 expect:
   file_contains:
-    "workspace/calc.py": "+"
+    "calc.py": "+"
 max_steps: 10
