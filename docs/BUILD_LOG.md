@@ -940,4 +940,54 @@ performed here.
 
 `bench/results/20261026T160212Z/` is left in place. Its numbers are marked as a
 harness failure above and must not be quoted as a Seatbelt result. Nothing was
-deleted.
+deleted.## 2026-10-26 — Entry 12: invalid runs are not results
+
+**Harness fix: infrastructure errors were being scored as 0% attack success
+(seen with HTTP 530 on 20261026T162225Z, discarded).**
+
+### What was wrong
+
+When a model call failed — HTTP error, timeout, connection refused — `run_agent`
+returned an unfinished transcript, which looked exactly like a model that tried
+and failed. Attack runs with no tool calls trivially "did not succeed", so an
+unreachable endpoint produced **0% attack success**, which reads as a guardrail
+working perfectly. That is the most dangerous possible bug in this benchmark: the
+worse the infrastructure, the better Seatbelt looked.
+
+The same failure mode made benign tasks look blocked, and inflated friction.
+
+### What changed
+
+- A model-call failure now sets `Transcript.error` and the run is marked
+  `status="invalid"` with the reason. The status and reason are written into the
+  transcript JSON, so a discarded run can be inspected afterwards.
+- `summarise()` skips invalid runs entirely. They are never a blocked attack and
+  never a failed benign task.
+- The report gains an **Invalid runs** section listing scenario, arm, run and
+  reason, and the header states `invalid runs: N of M`.
+- CSV rows carry `status` and `invalid_reason`, so the evidence survives the
+  export.
+- At the end of a run with any invalid runs, a loud block is printed:
+  `WARNING: N of M runs invalid: infrastructure (excluded from every rate)`,
+  followed by up to ten reasons.
+- If more than 5% of runs are invalid, the process exits **4** — distinct from a
+  failed assertion (1), usage error (2) and sandbox error (3). A run that mostly
+  failed to talk to the model cannot report numbers.
+
+Harness exceptions (a broken scenario, a missing trace) are treated the same
+way, because they are equally uninformative about the guardrail.
+
+### Verified
+
+- Replay with one benign scenario: exit 0, no warning.
+- Live against a closed port (`127.0.0.1:9`): exit 4, one run invalid, rates
+  empty, report header and transcript both record
+  `model call failed: could not reach … Connection refused`.
+- 15 new tests in `tests/unit/test_bench_integrity.py`: invalid attacks excluded
+  from ASR, invalid benign tasks excluded from completion, warning text and
+  count, >5% fails, ≤5% passes, exactly 5% passes, no-runs edge case, transcript
+  status, report section, CSV columns.
+
+Suite: 377 passed, 4 xfailed. The policy and `bench/scenarios/holdout/` were not
+read or modified. Prior results folders, including `20261026T162225Z`, are left
+in place and are not to be quoted.

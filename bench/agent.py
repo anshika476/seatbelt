@@ -80,11 +80,16 @@ class Transcript:
     steps: list[Step]
     finished: bool
     final: str = ""
+    #: Infrastructure failure (HTTP error, timeout, connection refused). This is
+    #: not the model failing the task; it is the harness failing to talk to the
+    #: model, and the run must not be scored.
+    error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "finished": self.finished,
             "final": self.final,
+            "error": self.error,
             "steps": [step.to_dict() for step in self.steps],
         }
 
@@ -268,9 +273,14 @@ def run_agent(
     while steps_used < max_steps:
         try:
             reply = client.chat(messages)
-        except Exception as exc:  # model failure ends the run, not the benchmark
+        except Exception as exc:  # infrastructure, not a model decision
             steps.append(Step(index=len(steps), reply="", parse_error=f"model error: {exc}"))
-            return Transcript(steps=steps, finished=False, final=f"model error: {exc}")
+            return Transcript(
+                steps=steps,
+                finished=False,
+                final=f"model error: {exc}",
+                error=f"model call failed: {exc}",
+            )
 
         kind, payload, error = classify_reply(reply)
 
