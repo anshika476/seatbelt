@@ -233,5 +233,111 @@ substitution, deep nesting, `find -exec`, subshells, `source`). 72 tests total.
 `seatbelt parse` exits `3` when the parser is unconfident, distinct from a
 policy denial, so a caller can tell "ask" from "deny" without parsing stdout.
 
-Next: T2, the deterministic policy engine over this tree.
+## 2026-10-26 — Entry 4: T2, the policy engine
 
+### Decision: severity first, with explicit fallbacks
+
+The first implementation merged rules by severity only: any matching deny wins,
+then ask, then allow. That is the right instinct for safety, and it produced a
+real bug that the corpus caught immediately: a broad fallback rule
+(`net.outbound`: "any request not on the allowlist -> ask") also matched
+`pypi.org`, so it outranked the specific `net.registries` allow and every
+package download became a question.
+
+Two ways out: first-match-wins in file order, or keep severity and mark the
+broad rules as fallbacks. I chose fallbacks. First-match makes safety depend on
+authoring order, which is exactly the kind of thing an exhausted policy author
+gets wrong at 2am. With `fallback: true`, a rule participates only when nothing
+more specific matched, so "deny always wins" survives while specific allows can
+still beat generic questions.
+
+`fallback` is now on `net.outbound` and `mcp.default`. It is not on
+`file.write_outside`, which instead uses `within_workspace: false` — a positive
+match on the condition it actually describes, with no ordering subtlety.
+
+### Decision: probes, not a monolithic evaluator
+
+A shell command is not one question. `echo x | tee -a ~/.bashrc` is a read-only
+command and a write to a protected file. `mv ~/.ssh/id_rsa /tmp/k` is a write to
+`/tmp` and a destructive read of a key. The engine therefore emits **probes** —
+one per command in the tree, one per redirect target, and one each for `tee`,
+`dd of=`, `mv`/`cp`/`ln` destinations, `find -delete`, pipe-to-shell, inline
+interpreter code, and execution of a session-created file — and merges their
+verdicts.
+
+Merging is by severity, and on a tie a probe that matched a real rule beats one
+that fell through to `policy.default`. Without that tie-break, `python -c …`
+reported `policy.default` instead of the more informative `shell.inline_code`,
+because both were `ask`.
+
+### Decision: paths are resolved once, before any matching
+
+`resolve_path` expands `~` and `$HOME`, joins the tracked cwd, and calls
+`realpath`, so `../../etc/passwd` and a symlink pointing out of the workspace
+both arrive at the same absolute path. Rules and the protected list match that
+resolved path. This is also why `mv ~/.ssh/id_rsa /tmp/k` is caught: the source
+is emitted as a `mv-source` write probe and hits `protected.path`.
+
+A path containing an unresolved variable (`$DIR/file`) does not resolve; it
+becomes an `unparsed` probe and the answer is `ask`.
+
+### Decision: the policy file and the audit log protect themselves
+
+They are not in the YAML protected list. The engine appends `ctx.policy_path`
+and `ctx.audit_path` to the protected set at evaluation time. A policy cannot
+forget to protect itself, and an agent editing the rules that govern it hits the
+same rule as any other protected write.
+
+### Decision: `allow` cannot cover the three risky probe types
+
+Inline interpreter code, commands the parser could not read, and execution of a
+file this session created are all `ask` by default. An `allow` rule covers them
+only with `allow_inline`, `allow_unparsed` or `allow_agent_created`. `deny` and
+`ask` rules match normally. This keeps the escape hatch explicit: you can permit
+`python -c` for one narrow flag pattern, but not by accident.
+
+### Known gaps (each has a strict xfail fixture)
+
+These are deliberate, visible and measured. Six in total, pinned in
+`src/seatbelt/data/cases.json` and run by both `seatbelt policy test` and pytest
+with `xfail(strict=True)`: closing one turns the fixture green and fails the
+build until the marker is removed, so the list cannot rot.
+
+| Gap | Fixture | Why it is not caught |
+| --- | --- | --- |
+| Download then run | `gap_download_then_run` | `curl -o` saves a file without a redirect, so it is not registered as agent-created; the later `/tmp/x.sh` is only an unknown binary |
+| Symlink to a protected tree | `gap_symlink_to_ssh` | creating a symlink is a write to the link path, not to the tree it points at |
+| Remote copy egress | `gap_rsync_remote` | `rsync`/`scp`/`ssh` targets are not parsed as network destinations |
+| Git config persistence | `gap_git_hooks_path` | `git config core.hooksPath` is a repo-level persistence path, and `git` subcommands are not modelled individually |
+| `chmod +s` | `gap_chmod_plus_s` | setuid written as bare `+s` does not match the `u+s`/`g+s` patterns |
+| Editor writes | `gap_editor_write` | `vim ~/.bashrc` writes files through a process Seatbelt never sees |
+
+### Limitations that are not gaps (they fail closed)
+
+These ask rather than allowing, so they are availability costs, not holes, and
+they are covered by the parser's confidence mechanism: heredoc bodies, process
+substitution, subshell grouping, `find -exec`, `bash -c` with an unreadable
+body, `source`, and command names computed at runtime.
+
+### Corpus
+
+63 cases in `src/seatbelt/data/cases.json`: 31 deny, 13 ask, 13 allow, plus the
+6 known gaps above (all expected to deny). The CLI (`seatbelt policy test`) and
+the test suite run the same file, so "the shipped policy behaves as documented"
+is checked in two places.
+
+Suite: 181 passed, 6 xfailed, 0.78s.
+
+### Also added
+
+- `seatbelt check -- <cmd>` prints a verdict with exit codes 0 allow, 1 deny,
+  3 ask, 2 usage/policy error, and `--json` for the full probe list. This is the
+  hook the demo and the benchmark will call.
+- Rule validation is strict: unknown keys, unknown kinds, duplicate ids, bad
+  regexes and unsupported versions all raise rather than being ignored. A typo
+  in `comand:` would otherwise silently widen a rule.
+- `default.yaml` shipped as package data. `bool` YAML gotcha: `true` and `false`
+  in a flow list parse as booleans, not command names — the readonly rule failed
+  to load until they were quoted.
+
+Next: T3, `seatbelt run` — the first frontend that actually executes.

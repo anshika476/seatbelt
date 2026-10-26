@@ -71,6 +71,30 @@ pip install -e ".[dev]"
 seatbelt version
 ```
 
+## Try it
+
+```bash
+seatbelt check -- 'rm -rf /'                  # DENY  shell.rm_recursive   (exit 1)
+seatbelt check -- 'pytest -q'                 # ALLOW shell.test_runner    (exit 0)
+seatbelt check -- 'python -c "print(1)"'      # ASK   shell.inline_code    (exit 3)
+seatbelt check --json -- 'echo x | tee -a ~/.bashrc'
+```
+
+Exit codes: `0` allow, `1` deny, `3` ask, `2` usage or policy error.
+
+`seatbelt check` resolves paths before matching, so these are the same verdict:
+
+```bash
+seatbelt check -- 'echo x > ~/.bashrc'
+seatbelt check -- 'cd / && echo x > ../root/.bashrc'
+```
+
+Run the declarative corpus against the shipped policy:
+
+```bash
+seatbelt policy test
+```
+
 ## Development
 
 ```bash
