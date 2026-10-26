@@ -140,3 +140,98 @@ signatures so only a public key is needed to verify.
 
 I chose to document the gap rather than pretend the env-var trick closes it.
 A guardrail that oversells itself is worse than one that names its seams.
+
+## 2026-10-26 — Entry 3: T1, the parser
+
+### Decision: confidence is a first-class output
+
+`parse()` returns `ParseResult(root, confident, notes)`. `confident=False` is
+not an error — it is the parser saying "I do not know what this does", and the
+engine must turn that into `ask`. Every place the parser gives up is an explicit
+`self.doubt(...)` call with a note that lands in the audit record, so a denial
+can always explain itself.
+
+This is the single most important design choice in the module. A parser that
+silently returns something plausible for input it does not understand is a
+vulnerability with good test coverage.
+
+### Decision: `shlex`, not `bashlex`
+
+`bashlex` is unmaintained and adds a dependency. Stdlib `shlex` with
+`punctuation_chars="();<>|&"` in POSIX mode gives words plus operators, which is
+enough for lists, pipelines, redirects and substitution. POSIX mode also removes
+quotes for free, which is why `r""m -rf /` arrives as `rm -rf /` — the first
+bypass falls out of correct tokenizing rather than a special case.
+
+### Decision: wrapper expansion in `flatten`, not in the tree
+
+`bash -c "rm -rf /"` stays a single `Command` whose argv[2] is the script
+string. `flatten()` then re-parses that string and appends the commands it
+finds, so `rm -rf /` appears as its own entry and a rule matching `rm` sees it
+wherever it was hidden. Keeping the tree faithful to the input and doing
+expansion on traversal means the audit record can show both "what was typed"
+and "what it resolves to".
+
+Expansion is bounded (`MAX_EXPANSIONS = 64`) so a crafted command cannot make
+the flatten loop forever.
+
+### Decision: a substitution in command position loses confidence
+
+`$(echo rm) -rf /` executes `rm -rf /`. We cannot know that without running
+`echo`, so the parser does the honest thing: it records the substitution, marks
+the parse unconfident, and the engine asks. Same for backticks in command
+position and for an unresolved `$CMD`.
+
+In argument position the substitution is expanded into the tree but the word is
+kept verbatim, so policy sees `echo "rm -rf /"` *and* the `rm -rf /` inside it.
+
+### Bugs the tests caught (all real, all fixed)
+
+1. `parse_pipeline` dropped assignments from a segment that produced no command,
+   so `VAR=rm; $VAR -rf /` failed to resolve. Assignment propagation now happens
+   before the `node is None` check.
+2. Substitution nodes were built and then thrown away, so `flatten` could not
+   see `rm` inside `` echo `rm -rf /` ``. They are now attached to the parent
+   `Command.inline`.
+3. `_read_dollar_paren` started at the opening paren and appended it to the
+   body, producing a nested parse of `( echo rm ) -rf /`. Off-by-one, caught by
+   the golden case for command-position substitution.
+4. Process substitution arrives as a single `<( ` token because the tokenizer
+   groups punctuation, so the `token == "<"` check never fired.
+5. `find . -exec rm {} ;` — the terminator is indistinguishable from a list
+   separator. Rather than pretend, `find` + `-exec` now loses confidence.
+
+### Known limitations (deliberate, each pinned by a test)
+
+| Input | Behaviour | Why |
+| --- | --- | --- |
+| `cat <<EOF` | `ask` | heredoc body is a separate document; not read |
+| `diff <(a) <(b)` | `ask` | process substitution not read |
+| `(cd /tmp && rm -rf x)` | `ask` | subshell grouping not read |
+| `find . -exec rm {} ;` | `ask` | terminator collides with `;` |
+| `bash -c` with no script | `ask` | nothing to read |
+| `source ./setup.sh` | `ask` | sourced file not inspected |
+| `$CMD -rf /` | `ask` | command name computed at runtime |
+| `$(echo rm) -rf /` | `ask` | command name computed at runtime |
+| `rm -rf $TARGET` | parse ok, literal `$TARGET` kept | argument value unknown but the command is known |
+| `eval "$DYNAMIC"` | `ask` if unparseable, else parsed | literal eval is read; dynamic eval loses confidence |
+| aliases, functions, globs, `$'…'` | not modelled | out of scope for a 45-minute parser |
+
+An unconfident parse is a *downgrade*, not a denial: the call goes to a human.
+That keeps the false-positive cost at "one approval" instead of "the agent
+cannot work".
+
+### Test corpus
+
+40 golden cases in `tests/golden/shell_cases.json`, of which 23 are bypass
+attempts (quote removal, backslash escape, split and long flags, command
+substitution, backticks, variable indirection, `bash -c`, nested `sh -c`,
+`sudo`/`env`/`xargs`/`timeout`/`nohup`/`command`, `eval`, quoted substitution,
+`curl | sh`, base64 piped to `bash`, heredocs, unbalanced quotes, process
+substitution, deep nesting, `find -exec`, subshells, `source`). 72 tests total.
+
+`seatbelt parse` exits `3` when the parser is unconfident, distinct from a
+policy denial, so a caller can tell "ask" from "deny" without parsing stdout.
+
+Next: T2, the deterministic policy engine over this tree.
+
