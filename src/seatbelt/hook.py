@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Mapping
 
@@ -45,6 +46,8 @@ from .audit import AuditLog, default_audit_path
 from .cases import default_policy_path
 from .engine import Engine, Evaluation
 from .policy import Decision, EvalContext, Policy, Probe, Verdict
+from .secrets import build_registry
+from .taint import TaintStore
 
 #: Tool names that read or write a file at a known path.
 READ_TOOLS = frozenset({"Read", "NotebookRead"})
@@ -161,12 +164,16 @@ def run_hook(args: argparse.Namespace) -> int:
     payload_cwd = _first(payload, "cwd", "current_dir")
     workspace = args.workspace or payload_cwd or policy.workspace
     cwd = args.cwd or payload_cwd or workspace
+    home = os.path.expanduser("~")
     ctx = EvalContext(
         workspace=workspace,
         cwd=cwd,
+        home=home,
         policy_path=str(policy.source),
         audit_path=audit_path or "",
     )
+    ctx.secrets = build_registry(workspace=workspace, home=home)
+    ctx.taint = TaintStore()
 
     evaluation, action = evaluate_payload(payload, policy, ctx)
     decision = evaluation.decision

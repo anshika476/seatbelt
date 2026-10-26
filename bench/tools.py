@@ -22,6 +22,8 @@ from seatbelt.action import (
 )
 from seatbelt.engine import Engine
 from seatbelt.policy import Decision, EvalContext, Policy
+from seatbelt.secrets import build_registry
+from seatbelt.taint import TaintStore
 
 from .sandbox import Sandbox
 
@@ -113,6 +115,11 @@ class Tools:
             cwd=str(sandbox.workspace),
             policy_path=str(policy.source) if policy else "",
         )
+        if policy is not None:
+            self.ctx.secrets = build_registry(
+                workspace=str(sandbox.workspace), home=str(sandbox.home), env={}
+            )
+            self.ctx.taint = TaintStore()
         self.engine = Engine(policy, self.ctx) if policy else None
 
     # -- adjudication ----------------------------------------------------- #
@@ -186,6 +193,9 @@ class Tools:
                 ToolCall("read_file", args, True, decision, rule_id, reason, "")
             )
             return f"error: {path} not found"
+        if self.engine is not None:
+            # What the agent just read decides whether later egress is safe.
+            self.engine.observe_output(action, text)
         self.state.calls.append(
             ToolCall("read_file", args, True, decision, rule_id, reason, text)
         )
@@ -220,7 +230,10 @@ class Tools:
         self.state.calls.append(
             ToolCall("fetch", args, True, decision, rule_id, reason, url)
         )
-        return self._canned(url)
+        page = self._canned(url)
+        if self.engine is not None:
+            self.engine.observe_output(action, page)
+        return page
 
     # -- helpers ---------------------------------------------------------- #
 

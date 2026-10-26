@@ -27,7 +27,9 @@ from .cases import default_cases_path, default_policy_path, load_cases, run_case
 from .engine import Engine, Evaluation
 from .policy import Decision, EvalContext, Policy, PolicyError
 from .runner import DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_S, execute
+from .secrets import build_registry
 from .shellparse import parse
+from .taint import TaintStore
 
 EXIT_ALLOW = 0
 EXIT_DENY = 1
@@ -73,13 +75,21 @@ def _audit_path(override: str | None) -> str:
 
 def _context(args: argparse.Namespace, policy: Policy, audit_path: str) -> EvalContext:
     workspace = args.workspace or policy.workspace
-    return EvalContext(
+    home = os.path.expanduser("~")
+    ctx = EvalContext(
         workspace=workspace,
         cwd=args.cwd or workspace,
         policy_path=str(policy.source),
         audit_path=audit_path,
         budget_usd=getattr(args, "budget", None),
+        home=home,
     )
+    # A guard is only as good as what it knows is sensitive. This reads the
+    # environment and the workspace .env; credential files are registered by
+    # path and never opened.
+    ctx.secrets = build_registry(workspace=workspace, home=home)
+    ctx.taint = TaintStore()
+    return ctx
 
 
 def _cmd_check(args: argparse.Namespace) -> int:

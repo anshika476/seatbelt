@@ -82,6 +82,9 @@ class EvalContext:
     created_files: set[str] = field(default_factory=set)
     spent_usd: float = 0.0
     budget_usd: float | None = None
+    secrets: Any = None
+    taint: Any = None
+    strict: bool = False
 
 
 @dataclass(frozen=True, slots=True)

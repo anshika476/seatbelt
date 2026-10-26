@@ -13,8 +13,9 @@ unresolvable path degrades to a question rather than an allow.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 from urllib.parse import urlsplit
 
@@ -56,6 +57,27 @@ DOWNLOAD_FLAGS = {
 #: Commands that copy to a remote host over the network.
 REMOTE_COPY_COMMANDS = frozenset({"rsync", "scp"})
 
+#: Commands that put data on the wire. Used only to decide whether a shell
+#: command is an egress candidate worth scanning for secrets and taint.
+EGRESS_COMMANDS = frozenset(
+    {
+        "curl",
+        "wget",
+        "nc",
+        "ncat",
+        "netcat",
+        "ssh",
+        "scp",
+        "rsync",
+        "sftp",
+        "telnet",
+        "socat",
+        "ftp",
+        "http",
+        "https",
+    }
+)
+
 
 def resolve_path(raw: str, ctx: EvalContext) -> tuple[str | None, str]:
     """Expand and normalize a path against the context.
@@ -78,6 +100,17 @@ def resolve_path(raw: str, ctx: EvalContext) -> tuple[str | None, str]:
     if not os.path.isabs(text):
         text = os.path.join(os.path.abspath(ctx.cwd), text)
     return os.path.realpath(text), ""
+
+
+def _within(path: str, root: str) -> bool:
+    """True when ``path`` is ``root`` or underneath it."""
+    if not path or not root:
+        return False
+    try:
+        root_path = os.path.realpath(root)
+        return os.path.commonpath([os.path.realpath(path), root_path]) == root_path
+    except ValueError:
+        return False
 
 
 def effective_command(command: Command) -> tuple[str, tuple[str, ...]]:
@@ -232,7 +265,102 @@ class Engine:
             return Evaluation(verdict)
 
         probes = self._shell_probes(action) if action.kind is ToolKind.SHELL else self._single_probe(action)
+        probes.extend(self._egress_probes(action))
         return self._merge(probes)
+
+    # -- taint and secrets ------------------------------------------------ #
+
+    def observe_output(self, action: Action, text: str) -> None:
+        """Record what a read returned, so later egress can be judged.
+
+        The engine only sees calls *before* they run, so taint has to be fed
+        from the outside: a frontend calls this with the fetched page, the file
+        contents, or the command's stdout.
+        """
+        if not text:
+            return
+
+        if self.ctx.taint is not None:
+            if action.kind is ToolKind.NET:
+                self.ctx.taint.add(action.target or "network", text)
+                self.ctx.strict = True
+            elif action.kind is ToolKind.FILE_READ:
+                if not _within(action.target, self.ctx.workspace):
+                    self.ctx.taint.add(action.target, text)
+                    self.ctx.strict = True
+
+        if self.ctx.secrets is not None and action.kind is ToolKind.FILE_READ:
+            name = os.path.basename(action.target)
+            if name == ".env" or name.startswith(".env."):
+                self.ctx.secrets.discover_dotenv(action.target)
+
+    def _egress_probes(self, action: Action) -> list[Probe]:
+        """Look for secrets and tainted text in what is about to leave."""
+        if not self._is_egress(action):
+            return []
+        text = self._payload_text(action)
+        if not text:
+            return []
+
+        probes: list[Probe] = []
+        if self.ctx.secrets is not None:
+            label = self.ctx.secrets.contains(text)
+            if label:
+                probes.append(
+                    Probe(action.kind, f"secret:{label}", detail="secret-egress")
+                )
+            path_label = self.ctx.secrets.referenced_path(text)
+            if path_label:
+                probes.append(
+                    Probe(action.kind, f"secret-file:{path_label}", detail="secret-egress")
+                )
+        if self.ctx.taint is not None:
+            source = self.ctx.taint.match(text)
+            if source:
+                probes.append(
+                    Probe(action.kind, f"tainted:{source}", detail="tainted-egress")
+                )
+        return probes
+
+    def _is_egress(self, action: Action) -> bool:
+        if action.kind in (ToolKind.NET, ToolKind.MCP):
+            return True
+        if action.kind is ToolKind.FILE_WRITE:
+            resolved, _ = resolve_path(action.target, self.ctx)
+            return bool(resolved and not _within(resolved, self.ctx.workspace))
+        if action.kind is ToolKind.SHELL:
+            if action.args.get("urls"):
+                return True
+            for command in flatten(parse(action.target).root):
+                name, _ = effective_command(command)
+                if name in EGRESS_COMMANDS:
+                    return True
+        return False
+
+    def _payload_text(self, action: Action) -> str:
+        if action.kind is ToolKind.NET:
+            return " ".join(
+                str(part)
+                for part in (
+                    action.target,
+                    action.args.get("body") or "",
+                    action.args.get("query") or "",
+                )
+                if part
+            )
+        if action.kind is ToolKind.SHELL:
+            return action.target
+        if action.kind is ToolKind.FILE_WRITE:
+            contents = action.args.get("contents")
+            parts = [action.target]
+            if isinstance(contents, str):
+                parts.append(contents)
+            return " ".join(parts)
+        if action.kind is ToolKind.MCP:
+            return action.target + " " + json.dumps(
+                action.args.get("arguments") or {}, sort_keys=True, default=str
+            )
+        return ""
 
     # -- probes ----------------------------------------------------------- #
 
@@ -457,4 +585,15 @@ class Engine:
             if key > best_key:
                 best_index = index
                 best_key = key
-        return Evaluation(evaluated[best_index][1], tuple(evaluated))
+        winner_index = best_index
+        winner_probe, winner_verdict = evaluated[winner_index]
+        # Name the thing that matched. "a secret appears in outbound data" is
+        # useless in an audit record; "env:AWS_SECRET_ACCESS_KEY" is not.
+        if winner_probe.target.startswith(
+            ("secret:", "secret-file:", "tainted:", "agent-created:")
+        ):
+            winner_verdict = replace(
+                winner_verdict,
+                reason=f"{winner_verdict.reason} [{winner_probe.target}]",
+            )
+        return Evaluation(winner_verdict, tuple(evaluated))

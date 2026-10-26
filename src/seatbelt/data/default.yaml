@@ -101,6 +101,11 @@ rules:
     decision: deny
     reason: world-writable or setuid permission change
 
+  - id: secrets.egress
+    match: {detail: [secret-egress]}
+    decision: deny
+    reason: a secret value or credential path appears in outbound data
+
   - id: shell.pipe_to_shell
     match: {kind: shell, detail: [pipe-to-shell]}
     decision: deny
@@ -135,6 +140,11 @@ rules:
     match: {kind: shell, detail: [unresolved-path]}
     decision: ask
     reason: a path in the command could not be resolved statically
+
+  - id: tools.tainted_egress
+    match: {detail: [tainted-egress]}
+    decision: ask
+    reason: outbound data contains text from an untrusted source
 
   - id: shell.package_install
     match:
