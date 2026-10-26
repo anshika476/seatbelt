@@ -445,6 +445,10 @@ class _Parser:
             self.doubt("find -exec terminator is not distinguishable from a list operator")
         if name in SHELLS and "-c" in argv and argv.index("-c") + 1 >= len(argv):
             self.doubt("shell invoked with -c but no script argument")
+        if name in SHELLS and "-c" in argv and argv.index("-c") + 1 < len(argv):
+            # Read the script now so its own doubts become ours: a ``bash -c``
+            # whose body we cannot read must not look confident.
+            self._parse_nested(argv[argv.index("-c") + 1], env, depth, "shell -c")
         if name in {"source", "."}:
             self.doubt("sourced script contents are not inspected")
 
