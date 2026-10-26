@@ -27,6 +27,62 @@ GENESIS_HASH = "0" * 64
 
 REDACTED = "[redacted]"
 
+#: Environment variable holding the audit HMAC key.
+#:
+#: Seatbelt reads it at startup and removes it from the environment of every
+#: command it executes, so a guarded shell cannot simply run ``env`` and lift
+#: it. That is a speed bump, not isolation: see ``docs/THREAT_MODEL.md``.
+AUDIT_KEY_ENV = "SEATBELT_AUDIT_KEY"
+
+#: Prefix used for every variable stripped from a child environment.
+_PROTECTED_ENV_PREFIX = "SEATBELT_"
+
+
+def key_from_env(env: Mapping[str, str] | None = None) -> bytes | None:
+    """Read the audit key from the environment.
+
+    Accepts 64 hex characters, base64, or at least 16 raw bytes. A value that is
+    present but unusable raises rather than silently falling back to a random
+    key, because a silent fallback would produce a log nobody can verify while
+    looking like everything worked.
+    """
+    source = os.environ if env is None else env
+    raw = source.get(AUDIT_KEY_ENV)
+    if not raw:
+        return None
+
+    text = raw.strip()
+    if len(text) == 64:
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            pass
+    try:
+        import base64
+
+        decoded = base64.b64decode(text, validate=True)
+        if len(decoded) >= 16:
+            return decoded
+    except (ValueError, TypeError):
+        pass
+    if len(text.encode("utf-8")) >= 16:
+        return text.encode("utf-8")
+    raise ValueError(
+        f"{AUDIT_KEY_ENV} is set but unusable: expected 64 hex chars, base64, "
+        "or at least 16 raw bytes"
+    )
+
+
+def child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment to hand to an executed command.
+
+    Every ``SEATBELT_*`` variable is removed, so the guarded process does not
+    inherit the audit key, the policy path, or any other seatbelt knob. The
+    guardian keeps its own copy in memory.
+    """
+    source = dict(os.environ if env is None else env)
+    return {k: v for k, v in source.items() if not k.startswith(_PROTECTED_ENV_PREFIX)}
+
 
 def _canonical(payload: Mapping[str, Any]) -> bytes:
     """Serialize deterministically so hashes do not depend on key order."""
@@ -111,12 +167,20 @@ class VerifyResult:
 
 
 class AuditLog:
-    """An in-memory hash chain, persisted to JSONL in a later task."""
+    """An in-memory hash chain, persisted to JSONL in a later task.
+
+    The key comes from ``SEATBELT_AUDIT_KEY`` when it is set, so a log written
+    by one process can be verified by another. Without it the log uses an
+    ephemeral random key: the chain still detects edits, but only within the
+    life of that process.
+    """
 
     def __init__(self, key: bytes | None = None) -> None:
-        if key is not None and len(key) < 16:
+        resolved = key if key is not None else key_from_env()
+        if resolved is not None and len(resolved) < 16:
             raise ValueError("audit key must be at least 16 bytes")
-        self._key = key or os.urandom(32)
+        self._key = resolved or os.urandom(32)
+        self._key_is_ephemeral = resolved is None
         self._records: list[AuditRecord] = []
 
     @property
@@ -124,9 +188,15 @@ class AuditLog:
         """The HMAC key.
 
         Needed to verify a log loaded in a different process. It must never be
-        written into the log file itself.
+        written into the log file itself, and it is stripped from the
+        environment of every command Seatbelt executes; see :func:`child_env`.
         """
         return self._key
+
+    @property
+    def key_is_ephemeral(self) -> bool:
+        """True when no key was supplied and a throwaway one was generated."""
+        return self._key_is_ephemeral
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:

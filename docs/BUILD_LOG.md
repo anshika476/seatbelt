@@ -82,3 +82,61 @@ side cannot open — would be worse.
 
 Next: shell parsing (T1), then the policy engine (T2) and the first end-to-end
 `seatbelt run` (T3).
+
+## 2026-10-26 — Entry 1: moving the repo into WSL
+
+The repo lived at `/mnt/c/Users/Anshi/.alan/workspace/seatbelt`, which meant
+every git operation crossed the 9p filesystem. The test suite took **1.77s** on
+`/mnt/c` and **0.04s** on the WSL filesystem for the same twelve tests. That is
+a 40x difference on a suite that is about to grow by an order of magnitude, so
+the repo moved.
+
+How: `git clone /mnt/c/.../seatbelt ~/seatbelt`, which carries the full history
+across, then a fresh venv at `~/seatbelt/.venv`, then the old directory deleted
+so there is exactly one checkout and no chance of working in the wrong one.
+
+Cost: the Windows side can still reach it through `\\wsl.localhost\Ubuntu\root\seatbelt`,
+so editors and file tools keep working. All commands run through
+`wsl -e bash -lc`. Note for future sessions: passing shell metacharacters
+through PowerShell's quoting layer silently mangles them — verification scripts
+are written to a file and executed, not inlined.
+
+Toolchain needed one install: `python3-venv` and `python3-pip` were missing from
+the Ubuntu image (`apt-get install -y python3-venv python3-pip`).
+
+## 2026-10-26 — Entry 2: where the audit key actually lives
+
+Question asked, and worth writing down because the first answer was "nothing
+much":
+
+> Where does the audit HMAC key live, and what stops the guarded agent from
+> reading it?
+
+Before the fix: `AuditLog.__init__` did `key or os.urandom(32)`. The key lived
+only in the guardian's memory, which sounds fine until you notice the guardian
+is usually a **child of the agent**. The agent could not read the log's key from
+the file (it was never written), but it could start its own Seatbelt, and it
+shared a user with the process holding the key.
+
+What changed:
+
+1. The key is read from `SEATBELT_AUDIT_KEY` (64 hex chars, base64, or ≥16 raw
+   bytes), so a log written by one process can be verified by another. That is
+   the whole point of an audit log; a per-process random key makes the chain
+   unverifiable the moment the process exits.
+2. `child_env()` strips every `SEATBELT_*` variable from the environment of any
+   command Seatbelt executes, so `env` and `/proc/self/environ` inside a tool
+   call do not show the key.
+3. An unusable key **raises** instead of silently falling back to a random one.
+   A silent fallback produces a log nobody can verify while looking healthy,
+   which is the worst possible failure for this component.
+
+What did not change, and is now written in `docs/THREAT_MODEL.md` under "The
+audit key": none of this stops an attacker with same-user process access from
+reading `/proc/<pid>/mem`. `ptrace_scope=1` helps only when the guardian is not
+the agent's descendant, and it usually is. The documented remedy is a real
+boundary — guardian under a different uid, a separate container, or asymmetric
+signatures so only a public key is needed to verify.
+
+I chose to document the gap rather than pretend the env-var trick closes it.
+A guardrail that oversells itself is worse than one that names its seams.
