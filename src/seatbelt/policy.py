@@ -107,6 +107,7 @@ class Rule:
     detail: tuple[str, ...] = ()
     flags_any: tuple[re.Pattern[str], ...] = ()
     flags_all: tuple[re.Pattern[str], ...] = ()
+    flags_none: tuple[re.Pattern[str], ...] = ()
     within_workspace: bool | None = None
     allow_inline: bool = False
     allow_unparsed: bool = False
@@ -149,6 +150,10 @@ class Rule:
             for pattern in self.flags_all:
                 if not any(pattern.search(token) for token in probe.argv):
                     return False
+        if self.flags_none and any(
+            pattern.search(token) for pattern in self.flags_none for token in probe.argv
+        ):
+            return False
         return True
 
 
@@ -205,6 +210,7 @@ _ALLOWED_MATCH_KEYS = {
     "detail",
     "flags_any",
     "flags_all",
+    "flags_none",
     "within_workspace",
     "allow_inline",
     "allow_unparsed",
@@ -238,6 +244,7 @@ def _rule_from_dict(raw: Mapping[str, Any], index: int) -> Rule:
         detail=_as_tuple(match.get("detail"), "detail", rule_id),
         flags_any=_compile_all(match.get("flags_any"), "flags_any", rule_id),
         flags_all=_compile_all(match.get("flags_all"), "flags_all", rule_id),
+        flags_none=_compile_all(match.get("flags_none"), "flags_none", rule_id),
         within_workspace=match.get("within_workspace"),
         allow_inline=bool(match.get("allow_inline", False)),
         allow_unparsed=bool(match.get("allow_unparsed", False)),

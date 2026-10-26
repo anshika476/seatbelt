@@ -388,6 +388,13 @@ class Engine:
             candidates.append(argv[0])
         if name in {"bash", "sh", "zsh", "dash"} and "-c" not in argv and len(argv) > 1:
             candidates.append(argv[1])
+        if name in INTERPRETERS and not _has_inline_flag(name, argv):
+            # ``python3 exfil.py`` runs a file the agent may have just written.
+            # Without this, dropping a script and running it is a free pass past
+            # the agent-created check, which only looked at argv[0].
+            script = _first_non_flag(argv[1:])
+            if script:
+                candidates.append(script)
 
         probes: list[Probe] = []
         for candidate in candidates:

@@ -189,6 +189,14 @@ rules:
     decision: allow
     reason: python module entry point for a known tool
 
+  - id: shell.python_script
+    match:
+      kind: shell
+      command: [python, python3, node]
+      flags_none: ["^-c$", "^-e$", "^--eval$", "^-m$", "^-p$"]
+    decision: allow
+    reason: running a script file, not inline code
+
   - id: shell.http_client
     match: {kind: shell, command: [curl, wget]}
     decision: allow
