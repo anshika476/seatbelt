@@ -21,6 +21,7 @@ import json
 import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 GENESIS_HASH = "0" * 64
@@ -36,6 +37,18 @@ AUDIT_KEY_ENV = "SEATBELT_AUDIT_KEY"
 
 #: Prefix used for every variable stripped from a child environment.
 _PROTECTED_ENV_PREFIX = "SEATBELT_"
+
+
+#: Where audit records go unless told otherwise. Outside the workspace on
+#: purpose: the agent can write the workspace, and must not write its own log.
+DEFAULT_AUDIT_PATH = "~/.seatbelt/audit.jsonl"
+
+
+def default_audit_path() -> str:
+    """Resolve the audit log path: explicit argument, environment, then default."""
+    return os.path.expanduser(
+        os.environ.get("SEATBELT_AUDIT_LOG") or DEFAULT_AUDIT_PATH
+    )
 
 
 def key_from_env(env: Mapping[str, str] | None = None) -> bytes | None:
@@ -95,6 +108,21 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _read_records(path: Path) -> list[AuditRecord]:
+    """Load a JSONL chain. A corrupt line is an error, never skipped."""
+    records: list[AuditRecord] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                records.append(AuditRecord.from_dict(json.loads(stripped)))
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ValueError(f"{path}:{number}: unreadable audit record: {exc}") from exc
+    return records
+
+
 def redact(value: Any, secrets: Iterable[str] = ()) -> Any:
     """Replace known secret values anywhere in a JSON-shaped structure.
 
@@ -129,6 +157,8 @@ class AuditRecord:
     evidence: Mapping[str, Any]
     prev_hash: str
     hash: str
+    exit_code: int | None = None
+    duration_ms: int | None = None
 
     def body(self) -> dict[str, Any]:
         """The hashed portion of the record: everything except ``hash``."""
@@ -141,12 +171,30 @@ class AuditRecord:
             "reason": self.reason,
             "evidence": dict(self.evidence),
             "prev_hash": self.prev_hash,
+            "exit_code": self.exit_code,
+            "duration_ms": self.duration_ms,
         }
 
     def to_dict(self) -> dict[str, Any]:
         body = self.body()
         body["hash"] = self.hash
         return body
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "AuditRecord":
+        return cls(
+            seq=int(raw["seq"]),
+            ts=str(raw["ts"]),
+            action=dict(raw.get("action") or {}),
+            decision=str(raw["decision"]),
+            rule_id=str(raw["rule_id"]),
+            reason=str(raw["reason"]),
+            evidence=dict(raw.get("evidence") or {}),
+            prev_hash=str(raw["prev_hash"]),
+            hash=str(raw["hash"]),
+            exit_code=raw.get("exit_code"),
+            duration_ms=raw.get("duration_ms"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,13 +223,16 @@ class AuditLog:
     life of that process.
     """
 
-    def __init__(self, key: bytes | None = None) -> None:
+    def __init__(self, key: bytes | None = None, path: str | os.PathLike[str] | None = None) -> None:
         resolved = key if key is not None else key_from_env()
         if resolved is not None and len(resolved) < 16:
             raise ValueError("audit key must be at least 16 bytes")
         self._key = resolved or os.urandom(32)
         self._key_is_ephemeral = resolved is None
+        self._path = Path(path) if path is not None else None
         self._records: list[AuditRecord] = []
+        if self._path is not None and self._path.exists():
+            self._records = _read_records(self._path)
 
     @property
     def key(self) -> bytes:
@@ -197,6 +248,10 @@ class AuditLog:
     def key_is_ephemeral(self) -> bool:
         """True when no key was supplied and a throwaway one was generated."""
         return self._key_is_ephemeral
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
 
     @property
     def records(self) -> tuple[AuditRecord, ...]:
@@ -227,8 +282,14 @@ class AuditLog:
         reason: str,
         evidence: Mapping[str, Any] | None = None,
         secrets: Iterable[str] = (),
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
     ) -> AuditRecord:
-        """Seal and append one record, returning it."""
+        """Seal and append one record, returning it.
+
+        When the log has a path the record is written through immediately and
+        flushed: a crash after a decision must not lose the decision.
+        """
         prev_hash = self._records[-1].hash if self._records else GENESIS_HASH
         record = AuditRecord(
             seq=len(self._records),
@@ -240,8 +301,17 @@ class AuditLog:
             evidence=redact(dict(evidence or {}), secrets),
             prev_hash=prev_hash,
             hash="",
+            exit_code=exit_code,
+            duration_ms=duration_ms,
         )
         sealed = replace(record, hash=self._seal(record.body()))
+        if self._path is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(sealed.to_dict(), sort_keys=True, ensure_ascii=False))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         self._records.append(sealed)
         return sealed
 
