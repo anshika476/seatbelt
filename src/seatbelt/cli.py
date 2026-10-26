@@ -267,6 +267,50 @@ def _cmd_run(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Check an audit log's hash chain. Exit 0 when intact, 1 when tampered."""
+    path = _audit_path(args.audit)
+    if not os.path.exists(path):
+        print(f"seatbelt: no audit log at {path}", file=sys.stderr)
+        return EXIT_USAGE
+
+    try:
+        log = AuditLog(path=path)
+    except ValueError as exc:
+        print(f"seatbelt: {exc}", file=sys.stderr)
+        return EXIT_DENY
+
+    result = log.verify()
+    payload = {
+        "ok": result.ok,
+        "path": path,
+        "records": len(log),
+        "checked": result.checked,
+        "failed_seq": result.failed_seq,
+        "reason": result.reason,
+        "key_from_env": not log.key_is_ephemeral,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        if result.ok:
+            print(f"OK    {len(log)} record(s) verified in {path}")
+        else:
+            print(
+                f"FAIL  record {result.failed_seq}: {result.reason} ({path})",
+                file=sys.stderr,
+            )
+        if log.key_is_ephemeral:
+            print(
+                "warning: SEATBELT_AUDIT_KEY is not set, so seals were checked with a "
+                "throwaway key. Set the original key to verify this log properly.",
+                file=sys.stderr,
+            )
+
+    return EXIT_ALLOW if result.ok else EXIT_DENY
+
+
 def _cmd_policy_test(args: argparse.Namespace) -> int:
     policy = _load_policy(args.policy)
     cases = load_cases(args.cases or default_cases_path())
@@ -358,6 +402,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_policy_options(hook_parser)
 
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="check that an audit log has not been tampered with",
+    )
+    verify_parser.add_argument("--audit", help=f"audit log path (default: {DEFAULT_AUDIT_PATH})")
+    verify_parser.add_argument("--json", action="store_true", help="emit machine-readable output")
+
     policy_parser = subparsers.add_parser("policy", help="policy tooling")
     policy_sub = policy_parser.add_subparsers(dest="policy_command", required=True)
     test_parser = policy_sub.add_parser("test", help="run the declarative policy corpus")
@@ -383,6 +434,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .hook import run_hook
 
             return run_hook(args)
+        if args.command == "verify":
+            return _cmd_verify(args)
         if args.command == "policy" and args.policy_command == "test":
             return _cmd_policy_test(args)
     except PolicyError as exc:

@@ -215,7 +215,7 @@ class VerifyResult:
 
 
 class AuditLog:
-    """An in-memory hash chain, persisted to JSONL in a later task.
+    """An in-memory hash chain, persisted to JSONL.
 
     The key comes from ``SEATBELT_AUDIT_KEY`` when it is set, so a log written
     by one process can be verified by another. Without it the log uses an
@@ -312,6 +312,7 @@ class AuditLog:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            self._write_anchor(sealed)
         self._records.append(sealed)
         return sealed
 
@@ -319,7 +320,7 @@ class AuditLog:
         return hmac.new(self._key, _canonical(body), hashlib.sha256).hexdigest()
 
     def verify(self) -> VerifyResult:
-        """Check sequence numbers, links and seals across the whole chain."""
+        """Check sequence numbers, links, seals, and the head anchor."""
         prev = GENESIS_HASH
         for index, record in enumerate(self._records):
             if record.seq != index:
@@ -333,4 +334,55 @@ class AuditLog:
             if not hmac.compare_digest(record.hash, self._seal(record.body())):
                 return VerifyResult(False, index, index, "record seal does not match its body")
             prev = record.hash
+
+        anchored = self._check_anchor()
+        if anchored is not None:
+            return anchored
         return VerifyResult(True, len(self._records))
+
+    # -- head anchor ------------------------------------------------------ #
+    #
+    # A hash chain cannot notice that its own tail was cut off: the last record
+    # links backwards, and nothing declares how long the chain should be. The
+    # anchor records the head (seq and hash) in a sidecar file, so deleting the
+    # newest record leaves the two disagreeing.
+    #
+    # This is not a security boundary. Anyone who can write the log can write the
+    # anchor too. It catches truncation by a tool, a truncating editor, or an
+    # agent that removes the record it dislikes, which is the realistic case.
+
+    @property
+    def _anchor_path(self) -> Path | None:
+        return self._path.with_suffix(self._path.suffix + ".head") if self._path else None
+
+    def _write_anchor(self, record: AuditRecord) -> None:
+        anchor = self._anchor_path
+        if anchor is None:
+            return
+        anchor.write_text(
+            json.dumps({"seq": record.seq, "hash": record.hash}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _check_anchor(self) -> VerifyResult | None:
+        anchor = self._anchor_path
+        if anchor is None or not anchor.exists():
+            return None
+        try:
+            data = json.loads(anchor.read_text(encoding="utf-8"))
+            expected_seq = int(data["seq"])
+            expected_hash = str(data["hash"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return VerifyResult(False, len(self._records), None, "head anchor is unreadable")
+
+        if not self._records:
+            return VerifyResult(False, 0, None, "head anchor exists but the log is empty")
+        last = self._records[-1]
+        if last.seq != expected_seq or not hmac.compare_digest(last.hash, expected_hash):
+            return VerifyResult(
+                False,
+                len(self._records),
+                len(self._records),
+                f"log ends at seq {last.seq} but the head anchor records seq {expected_seq}",
+            )
+        return None
