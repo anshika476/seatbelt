@@ -159,7 +159,7 @@ rules:
          pwd, echo, printf, which, type, date, jq, yq, tree, diff, cmp, basename,
          dirname, realpath, sha256sum, md5sum, sed, awk, column, nl,
          "true", "false", test, sleep, env, printenv, id, uname, whoami, df, du,
-         ps, xargs]
+         ps, xargs, seq, hostname, nproc, uptime, which]
     decision: allow
     reason: read-only command
 
@@ -239,6 +239,7 @@ rules:
     match: {kind: file_write, within_workspace: false}
     decision: ask
     reason: write outside the workspace
+    fallback: true
 
   # --------------------------------------------------------------------- #
   # MCP

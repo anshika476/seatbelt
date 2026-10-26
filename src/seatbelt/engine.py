@@ -47,6 +47,15 @@ WRITE_REDIRECT_OPS = frozenset({">", ">>", ">|", "&>", "&>>", "1>", "1>>", "2>",
 #: Commands whose final argument is the destination path.
 COPY_COMMANDS = frozenset({"cp", "mv", "install", "ln", "rsync"})
 
+#: Flags that name the file a downloader should write.
+DOWNLOAD_FLAGS = {
+    "curl": ("-o", "--output"),
+    "wget": ("-O", "--output-document"),
+}
+
+#: Commands that copy to a remote host over the network.
+REMOTE_COPY_COMMANDS = frozenset({"rsync", "scp"})
+
 
 def resolve_path(raw: str, ctx: EvalContext) -> tuple[str | None, str]:
     """Expand and normalize a path against the context.
@@ -107,6 +116,68 @@ def _is_write_redirect(op: str) -> bool:
 def _has_inline_flag(name: str, argv: tuple[str, ...]) -> bool:
     flags = INLINE_FLAGS.get(name, ())
     return any(token in flags for token in argv[1:])
+
+
+def download_target(name: str, argv: tuple[str, ...]) -> str | None:
+    """Return the file a downloader was told to write, if any.
+
+    ``curl -o path`` and ``wget -O path`` save to a named file without a shell
+    redirect, so this is the only place the guardian learns the file exists.
+    """
+    flags = DOWNLOAD_FLAGS.get(name)
+    if not flags:
+        return None
+    for index, token in enumerate(argv[1:], start=1):
+        if token in flags:
+            return argv[index + 1] if index + 1 < len(argv) else None
+        for flag in flags:
+            if token.startswith(flag + "="):
+                value = token[len(flag) + 1 :]
+                return value or None
+        if len(token) > 2 and token[:2] in flags and token.startswith("-") and not token.startswith("--"):
+            return token[2:]
+    return None
+
+
+def remote_host_from_argv(argv: tuple[str, ...]) -> str | None:
+    """Find the remote host in an rsync/scp argv.
+
+    The tokenizer splits ``user@host:/path`` at the colon because ``:`` is
+    punctuation, so the host is usually the token immediately before a lone
+    ``:``. A quoted destination keeps its colon and is handled by
+    :func:`remote_host`.
+    """
+    for index, token in enumerate(argv):
+        if token == ":" and 0 < index < len(argv) - 1:
+            head = argv[index - 1]
+            if head and not head.startswith(("-", "/")):
+                candidate = head.rsplit("@", 1)[-1]
+                if candidate:
+                    return candidate
+        if index > 0:
+            candidate = remote_host(token)
+            if candidate:
+                return candidate
+    return None
+
+
+def remote_host(target: str) -> str | None:
+    """Extract the host from an rsync/scp destination.
+
+    Handles ``user@host:/path``, ``host:path`` and ``rsync://host/module``.
+    A local path with no colon, or a URL with ``//``, is not a remote target.
+    """
+    if not target or target.startswith(("/", "./", "../", "~")):
+        return None
+    if "://" in target:
+        parsed = urlsplit(target)
+        return parsed.hostname or None
+    if ":" not in target:
+        return None
+    head, _, _path = target.partition(":")
+    if not head or "/" in head:
+        return None
+    return head.rsplit("@", 1)[-1] or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,12 +283,34 @@ class Engine:
             host = urlsplit(str(url)).hostname or ""
             probes.append(Probe(ToolKind.NET, host, detail="url", resolved=str(url)))
 
-        for command in flatten(result.root):
-            probes.extend(self._probes_for_command(command))
+        commands = flatten(result.root)
+        downloads = self._download_paths(commands)
+
+        for command in commands:
+            probes.extend(self._probes_for_command(command, downloads))
 
         return probes
 
-    def _probes_for_command(self, command: Command) -> list[Probe]:
+    def _download_paths(self, commands: list[Command]) -> set[str]:
+        """Files this command line downloads, resolved.
+
+        Collected before evaluation so ``curl -o x && ./x`` is recognised as
+        downloading and then running the same file, even though the download
+        has not happened yet when the exec probe is built.
+        """
+        paths: set[str] = set()
+        for command in commands:
+            name, argv = effective_command(command)
+            target = download_target(name, argv)
+            if not target:
+                continue
+            resolved, _ = resolve_path(target, self.ctx)
+            if resolved:
+                paths.add(resolved)
+        return paths
+
+    def _probes_for_command(self, command: Command, downloads: set[str] | None = None) -> list[Probe]:
+        downloads = downloads or set()
         name, argv = effective_command(command)
         if not name:
             return []
@@ -234,6 +327,17 @@ class Engine:
                     inline_code=True,
                 )
             )
+
+        # A downloader writing a named file is a write, even without '>'.
+        target = download_target(name, argv)
+        if target:
+            probes.extend(self._path_probes(target, "download-output"))
+
+        # rsync/scp move data to another host: that is egress.
+        if name in REMOTE_COPY_COMMANDS:
+            host = remote_host_from_argv(argv)
+            if host:
+                probes.append(Probe(ToolKind.NET, host, detail="remote-copy", resolved=""))
 
         for redirect in command.redirects:
             if _is_write_redirect(redirect.op):
@@ -261,18 +365,24 @@ class Engine:
             root = _first_non_flag(argv[1:]) or "."
             probes.extend(self._path_probes(root, "find-delete"))
 
-        probes.extend(self._agent_created_probes(name, argv, command))
+        probes.extend(self._agent_created_probes(name, argv, command, downloads))
 
         return probes
 
     def _agent_created_probes(
-        self, name: str, argv: tuple[str, ...], command: Command
+        self,
+        name: str,
+        argv: tuple[str, ...],
+        command: Command,
+        downloads: set[str] | None = None,
     ) -> list[Probe]:
-        """Flag execution of a file this session wrote.
+        """Flag execution of a file this session wrote or downloaded.
 
-        A script the agent just created is exactly the shape of a download-and-run
-        chain, so running one is a question even when the path is ordinary.
+        A script the agent just created is exactly the shape of a
+        download-and-run chain, so running one is a question even when the path
+        is ordinary.
         """
+        available = set(self.ctx.created_files) | (downloads or set())
         candidates: list[str] = []
         if argv and ("/" in argv[0] or argv[0].startswith(".")):
             candidates.append(argv[0])
@@ -282,7 +392,7 @@ class Engine:
         probes: list[Probe] = []
         for candidate in candidates:
             resolved, _ = resolve_path(candidate, self.ctx)
-            if resolved and resolved in self.ctx.created_files:
+            if resolved and resolved in available:
                 probes.append(
                     Probe(
                         ToolKind.SHELL,
@@ -323,16 +433,20 @@ class Engine:
                 if probe.resolved:
                     self.ctx.created_files.add(probe.resolved)
 
-        # Highest severity wins. On a tie, a probe that matched a real rule
-        # explains the outcome better than one that fell through to the
-        # default, so it wins; otherwise the earlier probe wins.
+        # Highest severity wins. On a tie, a specific rule explains the outcome
+        # better than the policy default or a catch-all fallback, so it wins;
+        # otherwise the earlier probe wins.
+        def rank(verdict: Verdict) -> tuple[int, bool, bool]:
+            return (
+                verdict.decision.severity,
+                verdict.rule_id != "policy.default",
+                not self.policy.is_fallback(verdict.rule_id),
+            )
+
         best_index = 0
-        best_key = (
-            evaluated[0][1].decision.severity,
-            evaluated[0][1].rule_id != "policy.default",
-        )
+        best_key = rank(evaluated[0][1])
         for index, (_, verdict) in enumerate(evaluated[1:], start=1):
-            key = (verdict.decision.severity, verdict.rule_id != "policy.default")
+            key = rank(verdict)
             if key > best_key:
                 best_index = index
                 best_key = key

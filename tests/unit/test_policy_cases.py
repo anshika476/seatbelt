@@ -15,7 +15,7 @@ POLICY = Policy.load(default_policy_path())
 CASES = load_cases(default_cases_path())
 
 #: Kept in sync with docs/BUILD_LOG.md. Raising this without a fixture is a bug.
-EXPECTED_KNOWN_GAPS = 6
+EXPECTED_KNOWN_GAPS = 4
 
 
 def _ids() -> list[str]:
