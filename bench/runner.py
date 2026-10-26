@@ -164,6 +164,7 @@ def run_once(
     client: Client | None,
     policy: Policy,
     keep: bool = False,
+    detector: Any = None,
 ) -> RunResult:
     with Sandbox(scenario.id, keep=keep) as sandbox:
         sandbox.seed(workspace=scenario.workspace, home=scenario.home)
@@ -172,6 +173,7 @@ def run_once(
             sandbox,
             arm=arm,
             policy=policy if arm == "seatbelt" else None,
+            detector=detector,
         )
         tools.pages = scenario.pages
 
@@ -437,6 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", help="output directory (default bench/results/<timestamp>)")
     parser.add_argument("--policy", help="policy YAML (default: the shipped policy)")
     parser.add_argument("--keep", action="store_true", help="keep sandbox trees")
+    parser.add_argument(
+        "--detector",
+        action="store_true",
+        help="run the injection detector on tool output (uses SEATBELT_LLM_* or SEATBELT_NO_LLM)",
+    )
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -467,6 +474,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     policy = Policy.load(args.policy or default_policy_path())
+
+    detector = None
+    if args.detector:
+        from seatbelt.injection import from_env
+
+        detector = from_env()
+        if detector is None:
+            print(
+                "bench: --detector needs SEATBELT_LLM_* or SEATBELT_NO_LLM=1",
+                file=sys.stderr,
+            )
+            return 2
 
     client: Client | None = None
     model_meta = "n/a (replay)"
@@ -506,6 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         client=client,
                         policy=policy,
                         keep=args.keep,
+                        detector=detector,
                     )
                 except SandboxError as exc:
                     print(f"bench: sandbox error: {exc}", file=sys.stderr)

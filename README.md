@@ -148,6 +148,31 @@ Run the declarative corpus against the shipped policy:
 seatbelt policy test
 ```
 
+## Injection detector
+
+Tool output is the surface a prompt-only guard cannot see. `seatbelt scan`
+classifies text with a small open model over an OpenAI-compatible endpoint:
+
+```bash
+echo "$(curl -s https://docs.example/page)" | seatbelt scan
+# 0.92  model  "ignore previous instructions"
+```
+
+It **can only escalate**: a positive signal turns an otherwise-allowed action
+into an `ask`. It never turns an ask into an allow, and a timeout or an error is
+recorded as *no signal*, never as a clean verdict. The scanned text is delimited
+and treated as data, so the detector cannot be instructed by what it inspects.
+
+`SEATBELT_NO_LLM=1` uses a keyword stub. `python -m bench.injection_eval`
+measures either against a labelled set; the stub scores precision 0.62 / FPR 0.30
+on 20 cases that include security documentation quoting injection phrases — see
+`docs/BUILD_LOG.md` for why those numbers are reported as-is.
+
+## Roadmap
+
+- MCP stdio proxy (dropped from this build; the Claude Code hook covers the same
+  integration question with less code).
+
 ## Benchmark
 
 Seatbelt is measured, not asserted. The harness runs a real open model against

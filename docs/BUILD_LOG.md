@@ -730,5 +730,88 @@ registries stay usable. Recorded, not hidden.
 No attack regressed; `exfil-script-drop` is still blocked. The one remaining
 friction is `benign-fetch-docs`, which asks because `docs.example` is not an
 allowlisted host.
+## 2026-10-26 — Entry 9: T8, the injection detector
 
-Suite: 295 passed, 4 xfailed.
+### Shape
+
+`seatbelt scan` reads text on stdin; `InjectionDetector` asks an
+OpenAI-compatible endpoint for strict JSON (`{"score": 0..1, "span": "..."}`),
+caches by content hash, and gives up after 2 seconds. `SEATBELT_NO_LLM=1` swaps
+in a keyword heuristic so the pipeline runs with no endpoint at all.
+
+Inside an agent loop, the detector runs on tool output, in
+`Engine.observe_output`: a firing signal sets `strict`, adds the text to the taint
+store, and from then on an otherwise-allowed egress becomes a question.
+
+### The three constraints are structural
+
+- **Only escalates.** The escalation lives in one place and is guarded by
+  `if evaluation.decision is Decision.ALLOW`. A deny stays a deny; an ask never
+  becomes an allow because a model thought the text was fine. Tests pin both.
+- **Fails quiet.** Timeout, HTTP error, non-JSON, a missing score, a score
+  outside `[0, 1]`, a non-string span — all become `Signal(0.0, ..., error=...)`.
+  No signal is not evidence of safety; the deterministic rules already decided.
+- **The text is data.** It is wrapped in `<<<DATA>>>` delimiters and the prompt
+  says the delimited region is never an instruction. A detector that can be
+  injected by the thing it inspects would launder hostile content into a clean
+  verdict, which is worse than having no detector.
+
+Two implementation bugs worth remembering: the prompt contains a literal JSON
+example, so `str.format` treated `{"score": ...}` as a field and raised
+`KeyError`; it uses plain replacement now. And a detector that raises must not
+take down the run — the engine catches, records `ctx.injection_error`, and
+carries on with no signal.
+
+### Measurement, honestly
+
+20 labelled cases in `bench/data/injection_cases.jsonl`: 10 injected, and 10
+normal of which **three are security documentation that quotes injection
+phrases** on purpose. That is the hard negative a keyword detector dies on.
+
+Measured with the no-model heuristic (`SEATBELT_NO_LLM=1`), which is the only
+detector this environment can actually run — no model endpoint is configured:
+
+| Metric | Value |
+| --- | --- |
+| precision | 0.62 |
+| recall | 0.50 |
+| false-positive rate | 0.30 |
+| accuracy | 0.60 |
+| tp / fp / fn / tn | 5 / 3 / 5 / 7 |
+
+The three false positives are exactly the security docs (`neg-security-doc`,
+`neg-changelog`, `neg-config-doc`). The five false negatives are injections that
+avoid the phrase list (`[system] permission granted…`, an HTML comment, "note to
+AI", a conditional "if you are an AI agent", and a header-style override).
+
+**These are not the model's numbers.** They are the floor: what you get with no
+model at all. Running the same set against a real endpoint is one command:
+
+```bash
+SEATBELT_LLM_BASE_URL=... SEATBELT_LLM_API_KEY=... SEATBELT_LLM_MODEL=... \
+  python -m bench.injection_eval
+```
+
+Reporting the stub's precision as if it were the model's would be the dishonest
+move here, so the numbers above are labelled for what they are.
+
+### Why a 0.62-precision detector is still worth shipping
+
+Because it cannot lower a verdict. On the benchmark it changes nothing — 0/11
+attacks, 100% benign, 20% friction, identical with and without the detector —
+because the deterministic layers already handled those. Its value is in the case
+where the agent paraphrases untrusted text instead of copying it, which the
+shingle matcher cannot see. A sensor that is sometimes wrong and can only add
+friction is a different risk from a judge that is sometimes wrong and can remove
+it.
+
+`seatbelt scan --audit` records the signal, including errors, so "detector timed
+out" and "text was clean" do not look the same in a log.
+
+### T7 skipped
+
+The MCP stdio proxy is dropped from this build, not quietly: the Claude Code hook
+already proves a real agent integration, and the remaining hours buy more in the
+report and the holdout run. Recorded as roadmap in the README.
+
+Suite: 317 passed, 4 xfailed.

@@ -25,6 +25,7 @@ from .action import normalize_shell
 from .audit import AuditLog, child_env, default_audit_path
 from .cases import default_cases_path, default_policy_path, load_cases, run_cases
 from .engine import Engine, Evaluation
+from .injection import from_env as detector_from_env
 from .policy import Decision, EvalContext, Policy, PolicyError
 from .runner import DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_S, execute
 from .secrets import build_registry
@@ -89,6 +90,7 @@ def _context(args: argparse.Namespace, policy: Policy, audit_path: str) -> EvalC
     # path and never opened.
     ctx.secrets = build_registry(workspace=workspace, home=home)
     ctx.taint = TaintStore()
+    ctx.detector = detector_from_env()
     return ctx
 
 
@@ -277,6 +279,50 @@ def _cmd_run(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Classify text on stdin. Diagnostic frontend for the injection detector."""
+    from .injection import from_env
+
+    detector = from_env()
+    text = sys.stdin.read()
+    if detector is None:
+        payload = {
+            "score": 0.0,
+            "span": "",
+            "source": "none",
+            "error": "no detector configured (set SEATBELT_LLM_* or SEATBELT_NO_LLM=1)",
+        }
+        print(json.dumps(payload, indent=2 if args.json else None))
+        return EXIT_USAGE
+
+    signal = detector.scan(text)
+    if args.json:
+        print(json.dumps(signal.to_dict(), indent=2))
+    else:
+        print(f"{signal.score:.2f}  {signal.source}  {signal.span}")
+
+    if args.audit:
+        # A no-signal result is recorded too: "the detector timed out" and "the
+        # text was clean" must not look the same in a log.
+        try:
+            log = AuditLog(path=_audit_path(args.audit))
+            log.append(
+                action={"kind": "scan", "target": args.label or "stdin"},
+                decision="ask" if signal.fired else "allow",
+                rule_id="injection.signal",
+                reason=(
+                    f"injection signal {signal.score:.2f}"
+                    if signal.fired
+                    else ("detector error: " + signal.error if signal.error else "no signal")
+                ),
+                evidence={"injection": signal.to_dict(), "chars": len(text)},
+            )
+        except OSError as exc:
+            print(f"seatbelt: cannot write the audit log: {exc}", file=sys.stderr)
+
+    return EXIT_ASK if signal.fired else EXIT_ALLOW
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     """Check an audit log's hash chain. Exit 0 when intact, 1 when tampered."""
     path = _audit_path(args.audit)
@@ -419,6 +465,19 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--audit", help=f"audit log path (default: {DEFAULT_AUDIT_PATH})")
     verify_parser.add_argument("--json", action="store_true", help="emit machine-readable output")
 
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="classify text on stdin for injected instructions",
+        description=(
+            "Read text on stdin and print the detector's score and span. "
+            "Exits 3 when the signal fires. Configure with SEATBELT_LLM_* or "
+            "SEATBELT_NO_LLM=1."
+        ),
+    )
+    scan_parser.add_argument("--json", action="store_true", help="emit JSON")
+    scan_parser.add_argument("--audit", help="append the signal to an audit log")
+    scan_parser.add_argument("--label", help="label recorded in the audit record")
+
     policy_parser = subparsers.add_parser("policy", help="policy tooling")
     policy_sub = policy_parser.add_subparsers(dest="policy_command", required=True)
     test_parser = policy_sub.add_parser("test", help="run the declarative policy corpus")
@@ -446,6 +505,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_hook(args)
         if args.command == "verify":
             return _cmd_verify(args)
+        if args.command == "scan":
+            return _cmd_scan(args)
         if args.command == "policy" and args.policy_command == "test":
             return _cmd_policy_test(args)
     except PolicyError as exc:

@@ -260,6 +260,7 @@ class Evaluation:
 
     verdict: Verdict
     probes: tuple[tuple[Probe, Verdict], ...] = ()
+    injection: Any = None
 
     @property
     def decision(self) -> Decision:
@@ -271,6 +272,7 @@ class Evaluation:
             "rule_id": self.verdict.rule_id,
             "reason": self.verdict.reason,
             "matched_rules": list(self.verdict.matches),
+            "injection": self.injection.to_dict() if self.injection is not None else None,
             "probes": [
                 {
                     "kind": probe.kind.value,
@@ -307,7 +309,25 @@ class Engine:
 
         probes = self._shell_probes(action) if action.kind is ToolKind.SHELL else self._single_probe(action)
         probes.extend(self._egress_probes(action))
-        return self._merge(probes)
+        evaluation = self._merge(probes)
+
+        # The detector may only move an allow to an ask. A deny stays a deny, and
+        # an ask never becomes an allow because a model thought the text was fine.
+        signal = self.ctx.injection
+        if (
+            evaluation.decision is Decision.ALLOW
+            and signal is not None
+            and getattr(signal, "fired", False)
+            and self._is_egress(action)
+        ):
+            verdict = Verdict(
+                Decision.ASK,
+                "injection.escalation",
+                f"injection signal {signal.score:.2f} in text from this session "
+                f"({signal.span[:80]!r}); egress needs a human",
+            )
+            return Evaluation(verdict, evaluation.probes, injection=signal)
+        return Evaluation(evaluation.verdict, evaluation.probes, injection=signal)
 
     # -- taint and secrets ------------------------------------------------ #
 
@@ -338,6 +358,24 @@ class Engine:
                 # The agent has now seen a credential. Everything it writes
                 # afterwards is suspect, and its own scripts stop being trusted.
                 self.ctx.secret_read = True
+
+        if self.ctx.detector is not None:
+            self._run_detector(action, text)
+
+    def _run_detector(self, action: Action, text: str) -> None:
+        """Scan what the agent just read. A firing signal taints the session."""
+        try:
+            signal = self.ctx.detector.scan(text)
+        except Exception as exc:  # noqa: BLE001 - a detector must never break a run
+            self.ctx.injection = None
+            self.ctx.injection_error = f"{type(exc).__name__}: {exc}"[:200]
+            return
+        self.ctx.last_signal = signal
+        if getattr(signal, "fired", False):
+            self.ctx.injection = signal
+            self.ctx.strict = True
+            if self.ctx.taint is not None:
+                self.ctx.taint.add(action.target or "untrusted", text)
 
     def _is_secret_path(self, path: str) -> bool:
         name = os.path.basename(path)

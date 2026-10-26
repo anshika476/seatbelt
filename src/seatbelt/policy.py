@@ -86,6 +86,10 @@ class EvalContext:
     budget_usd: float | None = None
     secrets: Any = None
     taint: Any = None
+    detector: Any = None
+    injection: Any = None
+    last_signal: Any = None
+    injection_error: str = ""
     strict: bool = False
     secret_read: bool = False
 

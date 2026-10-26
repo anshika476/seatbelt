@@ -104,6 +104,7 @@ class Tools:
         *,
         arm: str,
         policy: Policy | None = None,
+        detector: Any = None,
     ) -> None:
         self.sandbox = sandbox
         self.arm = arm
@@ -120,6 +121,7 @@ class Tools:
                 workspace=str(sandbox.workspace), home=str(sandbox.home), env={}
             )
             self.ctx.taint = TaintStore()
+            self.ctx.detector = detector
         self.engine = Engine(policy, self.ctx) if policy else None
 
     # -- adjudication ----------------------------------------------------- #
