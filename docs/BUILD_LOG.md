@@ -814,4 +814,59 @@ The MCP stdio proxy is dropped from this build, not quietly: the Claude Code hoo
 already proves a real agent integration, and the remaining hours buy more in the
 report and the holdout run. Recorded as roadmap in the README.
 
-Suite: 317 passed, 4 xfailed.
+Suite: 317 passed, 4 xfailed.## 2026-10-26 — Entry 10: harness fix before any holdout run
+
+**Harness fix before any holdout run: live reply parser was too strict for
+qwen2.5:14b. No policy changes.**
+
+### What broke
+
+`parse_reply` did `json.loads` on the slice from the first `{` to the *last* `}`.
+qwen2.5:14b appends commentary, or a second object, after a correct tool call, so
+the slice contained trailing data and `json.loads` raised *"Extra data: line 2
+column 1"*. Every step then became `tool=""` → "unknown tool", which meant even
+the unguarded arm could not complete a benign task. A benchmark that fails in
+the `none` arm is measuring its own harness.
+
+### What changed
+
+- **First object wins.** `json.JSONDecoder().raw_decode` from the first `{` takes
+  the first complete object and ignores the rest. Fences are stripped first, and
+  a reply that is a JSON *array* is rejected rather than mining the object inside
+  it.
+- **Key variants accepted:** `tool | name | function`, and
+  `args | arguments | parameters`, including the OpenAI
+  `{"function": {"name": ..., "arguments": "{...}"}}` shape. An `arguments`
+  string is decoded as JSON; if it does not decode, the call is refused.
+- **Fail-closed is unchanged.** A reply must be one clean object with a string
+  tool name and object arguments to be executed. Anything else is an error, and
+  errors never call a tool.
+- **One correction per run.** On an unparseable reply a single corrective message
+  is sent and the reply is retried without consuming a step. A second failure
+  ends the run with `finished=False` instead of burning the whole budget.
+- **Raw replies are kept.** Every transcript step now carries the model's reply
+  (truncated to 4000 chars), so a failed live run can be diagnosed without paying
+  for it again.
+
+### Tests
+
+24 tests in `tests/unit/test_agent_reply.py`: trailing text, two objects, fences,
+leading prose, arrays, string arguments, key variants, the OpenAI function shape,
+missing/typed-wrong tool names, invalid argument strings, garbage, and the loop
+behaviour (one correction, correction costs no step, second failure executes
+nothing, raw reply preserved).
+
+Suite: 342 passed, 4 xfailed. Corpus unchanged at 65/65 with 4 gaps. The policy
+and `bench/scenarios/holdout/` were not touched.
+
+### Re-run
+
+The requested live command needs an OpenAI-compatible endpoint
+(`SEATBELT_BENCH_BASE_URL`, `SEATBELT_BENCH_API_KEY`, `SEATBELT_BENCH_MODEL`).
+None is configured in this environment — no env vars and no listener on the usual
+local ports — so the run could not be executed against qwen2.5:14b here. The
+same command was run against the scripted endpoint (`bench/fake_model.py`)
+serving qwen-style replies — a correct call followed by prose, and a second
+object with `name`/`parameters` where `parameters` is a JSON string — to verify
+the fix end to end. That is a harness check, not a model result, and the numbers
+are reported as such.

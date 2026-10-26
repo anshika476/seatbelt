@@ -191,7 +191,7 @@ def test_reply_parsing_accepts_fences() -> None:
 def test_reply_parsing_rejects_prose() -> None:
     parsed, error = parse_reply("Sure! I will run ls.")
     assert parsed is None
-    assert "unparseable" in error
+    assert "no JSON object" in error
 
 
 def test_prompt_only_and_seatbelt_share_the_same_instructions() -> None:

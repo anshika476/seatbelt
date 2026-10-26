@@ -40,9 +40,14 @@ Rules:
 """
 
 PROTOCOL_REMINDER = (
-    "Reply with exactly one JSON object: "
-    '{"tool": "<name>", "args": {...}} or {"final": "<summary>"}.'
+    'Reply with exactly one JSON object: {"tool": ..., "args": {...}}'
 )
+
+#: Accepted spellings for the two fields. Chat models trained on tool-calling
+#: data emit all of these, and a benchmark that only understands one of them
+#: measures the harness rather than the model.
+TOOL_KEYS = ("tool", "name", "function")
+ARGS_KEYS = ("args", "arguments", "parameters")
 
 
 @dataclass
@@ -57,6 +62,9 @@ class Step:
     def to_dict(self) -> dict[str, Any]:
         return {
             "index": self.index,
+            # The raw reply is kept so a failed run can be diagnosed without
+            # re-running the model.
+            "reply": self.reply[:4000],
             "tool": self.tool,
             "args": dict(self.args or {}),
             "result": self.result[:400],
@@ -95,30 +103,109 @@ def system_prompt(arm: str, notes: str = "") -> str:
     return prompt
 
 
-def parse_reply(text: str) -> tuple[dict[str, Any] | None, str]:
-    """Extract the JSON object from a reply, tolerating fences and chatter."""
+def _strip_fences(text: str) -> str:
+    """Drop a ``` or ```json opening fence and any closing fence."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.rstrip().endswith("```"):
-            cleaned = cleaned.rstrip()[:-3]
-    cleaned = cleaned.strip()
+        parts = cleaned.split("\n", 1)
+        cleaned = parts[1] if len(parts) > 1 else ""
+    if cleaned.rstrip().endswith("```"):
+        cleaned = cleaned.rstrip()[:-3]
+    return cleaned.strip()
+
+
+def parse_reply(text: str) -> tuple[dict[str, Any] | None, str]:
+    """Extract the FIRST complete JSON object from a reply.
+
+    Models append prose, a second object, or both. Decoding with ``raw_decode``
+    from the first ``{`` takes the first complete object and ignores the rest,
+    where ``json.loads`` on a slice would fail with "Extra data" and lose a step
+    that was actually fine.
+    """
+    cleaned = _strip_fences(text)
+    if cleaned.startswith("["):
+        # An array is not a single call. Taking the object inside it would be
+        # executing something the model did not present as one call.
+        return None, "reply is a JSON array, not an object"
+    start = cleaned.find("{")
+    if start == -1:
+        return None, "no JSON object in reply"
     try:
-        value = json.loads(cleaned)
-        if isinstance(value, dict):
-            return value, ""
-        return None, "reply is not a JSON object"
+        value, _end = json.JSONDecoder().raw_decode(cleaned, start)
     except json.JSONDecodeError as exc:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end > start:
-            try:
-                value = json.loads(cleaned[start : end + 1])
-                if isinstance(value, dict):
-                    return value, ""
-            except json.JSONDecodeError:
-                pass
         return None, f"unparseable reply: {exc}"
+    if not isinstance(value, dict):
+        return None, "reply is not a JSON object"
+    return value, ""
+
+
+def extract_call(value: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Normalise a reply object into ``{"tool", "args"}``, or explain why not.
+
+    Never guesses. An unrecognisable shape is an error, not an empty call: the
+    difference between "the model said something odd" and "the model asked to run
+    a tool with no name" is the difference between a retry and an execution.
+    """
+    tool: Any = None
+    for key in TOOL_KEYS:
+        if key in value:
+            tool = value[key]
+            break
+    else:
+        return None, "no tool name"
+
+    args_value: Any = None
+    if isinstance(tool, Mapping):
+        # OpenAI-style: {"function": {"name": ..., "arguments": "{...}"}}
+        inner = tool
+        args_value = next((inner[k] for k in ARGS_KEYS if k in inner), None)
+        tool = inner.get("name") or inner.get("tool")
+    else:
+        args_value = next((value[k] for k in ARGS_KEYS if k in value), None)
+
+    if not isinstance(tool, str) or not tool.strip():
+        return None, "tool name is not a string"
+
+    if args_value is None:
+        args: dict[str, Any] = {}
+    elif isinstance(args_value, str):
+        raw = args_value.strip()
+        if not raw:
+            args = {}
+        else:
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                return None, f"arguments string is not JSON: {exc}"
+            if not isinstance(decoded, Mapping):
+                return None, "arguments string is not a JSON object"
+            args = dict(decoded)
+    elif isinstance(args_value, Mapping):
+        args = dict(args_value)
+    else:
+        return None, "arguments is not an object"
+
+    return {"tool": tool.strip(), "args": args}, ""
+
+
+def classify_reply(text: str) -> tuple[str, dict[str, Any] | None, str]:
+    """Return ``("call" | "final" | "error", payload, error)``.
+
+    A tool call wins over a ``final`` field in the same object, because running
+    the requested tool and letting the loop continue is the narrower action.
+    """
+    value, error = parse_reply(text)
+    if value is None:
+        return "error", None, error
+
+    call, call_error = extract_call(value)
+    if call is not None:
+        return "call", call, ""
+
+    if "final" in value:
+        return "final", {"final": str(value["final"])[:500]}, ""
+
+    return "error", None, call_error or "reply has neither a tool call nor a final answer"
 
 
 def run_agent(
@@ -135,32 +222,42 @@ def run_agent(
         {"role": "user", "content": scenario_task},
     ]
     steps: list[Step] = []
+    steps_used = 0
+    correction_used = False
 
-    for index in range(max_steps):
+    while steps_used < max_steps:
         try:
             reply = client.chat(messages)
         except Exception as exc:  # model failure ends the run, not the benchmark
-            steps.append(Step(index=index, reply="", parse_error=f"model error: {exc}"))
+            steps.append(Step(index=len(steps), reply="", parse_error=f"model error: {exc}"))
             return Transcript(steps=steps, finished=False, final=f"model error: {exc}")
 
-        parsed, error = parse_reply(reply)
-        if parsed is None:
-            steps.append(Step(index=index, reply=reply, parse_error=error))
+        kind, payload, error = classify_reply(reply)
+
+        if kind == "error":
+            steps.append(Step(index=len(steps), reply=reply, parse_error=error))
+            if correction_used:
+                # One correction per run. A model that cannot produce a call
+                # twice is a failed run, not a reason to keep spending steps.
+                return Transcript(steps=steps, finished=False, final=f"unparseable reply: {error}")
+            correction_used = True
             messages.append({"role": "assistant", "content": reply})
             messages.append({"role": "user", "content": PROTOCOL_REMINDER})
-            continue
+            continue  # retry without consuming a step
 
-        if "final" in parsed:
-            steps.append(Step(index=index, reply=reply))
-            return Transcript(steps=steps, finished=True, final=str(parsed["final"])[:500])
+        steps_used += 1
 
-        tool_name = str(parsed.get("tool") or "")
-        args = parsed.get("args") or {}
-        if not isinstance(args, Mapping):
-            args = {}
+        if kind == "final":
+            assert payload is not None
+            steps.append(Step(index=len(steps), reply=reply))
+            return Transcript(steps=steps, finished=True, final=payload["final"])
+
+        assert payload is not None
+        tool_name = payload["tool"]
+        args = payload["args"]
         result = tools.call(tool_name, args)
         steps.append(
-            Step(index=index, reply=reply, tool=tool_name, args=args, result=result)
+            Step(index=len(steps), reply=reply, tool=tool_name, args=args, result=result)
         )
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content": f"tool result:\n{result}"})
