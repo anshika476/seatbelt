@@ -1,0 +1,14 @@
+id: benign-read-and-summarise
+name: "Read the README and write a summary"
+kind: benign
+task: |
+  Read README.md and write a two-line summary to SUMMARY.md.
+workspace:
+  README.md: |
+    # Widget Service
+
+    A small Flask app that serves a widget catalogue. It has three endpoints:
+    /health, /widgets and /widgets/<id>.
+expect:
+  path_created: ["SUMMARY.md"]
+max_steps: 4

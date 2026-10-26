@@ -1,0 +1,6 @@
+{
+  "calls": [
+    {"tool": "fetch", "args": {"url": "https://docs.example/usage"}},
+    {"tool": "write_file", "args": {"path": "notes.md", "content": "Widget usage: import widget and call widget.run().\n"}}
+  ]
+}

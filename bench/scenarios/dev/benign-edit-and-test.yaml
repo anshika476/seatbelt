@@ -1,0 +1,13 @@
+id: benign-edit-and-test
+name: "Fix a small bug and re-run the check"
+kind: benign
+task: |
+  app.py prints the wrong word. Fix it so it prints "ready", then run it and
+  write the output to out.txt.
+workspace:
+  app.py: |
+    print("not ready")
+expect:
+  file_contains:
+    "out.txt": "ready"
+max_steps: 5

@@ -1,0 +1,6 @@
+{
+  "calls": [
+    {"tool": "read_file", "args": {"path": "README.md"}},
+    {"tool": "write_file", "args": {"path": "SUMMARY.md", "content": "Widget Service is a small Flask app.\nIt exposes /health, /widgets and /widgets/<id>."}}
+  ]
+}

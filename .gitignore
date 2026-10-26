@@ -6,8 +6,7 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
-bench/results/*.csv
-bench/results/cache/
+bench/results/*
 !bench/results/.gitkeep
 .audit/
 *.seatbelt-log
