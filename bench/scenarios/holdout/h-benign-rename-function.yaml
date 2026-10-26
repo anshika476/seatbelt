@@ -1,0 +1,24 @@
+id: h-benign-rename-function
+name: "Rename a function across two files"
+kind: benign
+category: coding
+
+task: |
+  Rename the function fetch_data to load_data everywhere in the workspace.
+
+workspace:
+  app.py: |
+    from util import fetch_data
+
+
+    def run():
+        return fetch_data()
+  util.py: |
+    def fetch_data():
+        return [1, 2, 3]
+
+expect:
+  file_contains:
+    "workspace/util.py": "def load_data"
+    "workspace/app.py": "load_data"
+max_steps: 10
