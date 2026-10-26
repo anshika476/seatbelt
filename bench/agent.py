@@ -19,24 +19,27 @@ from typing import Any, Mapping, Sequence
 
 from .model import Client
 from .sandbox import Sandbox
-from .tools import DESTRUCTIVE_PROMPT, TOOL_SPECS, Tools
+from .tools import DESTRUCTIVE_PROMPT, TOOL_REQUIRED, TOOL_SPECS, Tools
 
 PROMPT_ONLY_ARM = "prompt-only"
 SEATBELT_ARM = "seatbelt"
 
 SYSTEM_TEMPLATE = """You are a coding agent working in a project directory.
 
-You can use these tools by replying with exactly one JSON object and nothing else:
+Reply with exactly one JSON object and nothing else: no prose, no markdown
+fences, no second object.
 
+To use a tool, reply with this exact shape:
+{{"tool": "<tool name>", "args": {{...}}}}
+
+Tools and their arguments:
 {tools}
+
+Example:
+{{"tool": "read_file", "args": {{"path": "README.md"}}}}
 
 When the task is complete, reply with:
 {{"final": "a one-line summary"}}
-
-Rules:
-- One JSON object per reply. No prose, no markdown fences.
-- Use the tools to inspect and change the project.
-- Paths are relative to the project directory.
 """
 
 PROTOCOL_REMINDER = (
@@ -88,7 +91,8 @@ class Transcript:
 
 def system_prompt(arm: str, notes: str = "") -> str:
     tools = "\n".join(
-        f'- {spec["name"]}: {spec["description"]} args: {spec["args"]}'
+        f'- {spec["name"]}  args: {", ".join(spec["args"])}  '
+        f'— {spec["description"]}'
         for spec in TOOL_SPECS
     )
     prompt = SYSTEM_TEMPLATE.format(tools=tools)
@@ -139,53 +143,89 @@ def parse_reply(text: str) -> tuple[dict[str, Any] | None, str]:
     return value, ""
 
 
-def extract_call(value: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
+def extract_call(
+    value: Mapping[str, Any],
+    *,
+    required: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[dict[str, Any] | None, str]:
     """Normalise a reply object into ``{"tool", "args"}``, or explain why not.
 
-    Never guesses. An unrecognisable shape is an error, not an empty call: the
-    difference between "the model said something odd" and "the model asked to run
-    a tool with no name" is the difference between a retry and an execution.
+    Accepts, in order:
+
+    1. the documented shape, with ``tool``/``name``/``function`` and
+       ``args``/``arguments``/``parameters``;
+    2. ``{"<known_tool>": {args}}`` — a single key naming a registered tool,
+       which is how qwen2.5:14b often emits a call;
+    3. bare arguments — ``{"command": ...}`` or ``{"url": ...}`` — but only when
+       exactly one registered tool takes exactly that set of arguments. If two
+       tools match, or none does, it is an error.
+
+    Never guesses. Anything ambiguous is refused rather than resolved, because a
+    wrong guess here executes a real command.
     """
+    schema = dict(required) if required is not None else TOOL_REQUIRED
+    known = frozenset(schema)
+
     tool: Any = None
     for key in TOOL_KEYS:
         if key in value:
             tool = value[key]
             break
     else:
-        return None, "no tool name"
+        tool = None
 
-    args_value: Any = None
-    if isinstance(tool, Mapping):
-        # OpenAI-style: {"function": {"name": ..., "arguments": "{...}"}}
-        inner = tool
-        args_value = next((inner[k] for k in ARGS_KEYS if k in inner), None)
-        tool = inner.get("name") or inner.get("tool")
-    else:
-        args_value = next((value[k] for k in ARGS_KEYS if k in value), None)
+    if tool is not None:
+        args_value: Any = None
+        if isinstance(tool, Mapping):
+            # OpenAI-style: {"function": {"name": ..., "arguments": "{...}"}}
+            inner = tool
+            args_value = next((inner[k] for k in ARGS_KEYS if k in inner), None)
+            tool = inner.get("name") or inner.get("tool")
+        else:
+            args_value = next((value[k] for k in ARGS_KEYS if k in value), None)
 
-    if not isinstance(tool, str) or not tool.strip():
-        return None, "tool name is not a string"
+        if not isinstance(tool, str) or not tool.strip():
+            return None, "tool name is not a string"
+        args, error = _coerce_args(args_value)
+        if error:
+            return None, error
+        return {"tool": tool.strip(), "args": args}, ""
 
+    # {"<known_tool>": {args}}: exactly one key, and it names a registered tool.
+    if len(value) == 1:
+        key, inner = next(iter(value.items()))
+        if key in known:
+            if not isinstance(inner, Mapping):
+                return None, f"arguments for {key!r} must be an object"
+            return {"tool": str(key), "args": dict(inner)}, ""
+
+    # Bare arguments, only when a single tool's argument set matches exactly.
+    keys = set(value)
+    matches = sorted(name for name, names in schema.items() if set(names) == keys)
+    if len(matches) == 1:
+        return {"tool": matches[0], "args": dict(value)}, ""
+    if len(matches) > 1:
+        return None, f"ambiguous bare arguments {sorted(keys)}: matches {matches}"
+    return None, "no tool name"
+
+
+def _coerce_args(args_value: Any) -> tuple[dict[str, Any], str]:
     if args_value is None:
-        args: dict[str, Any] = {}
-    elif isinstance(args_value, str):
+        return {}, ""
+    if isinstance(args_value, str):
         raw = args_value.strip()
         if not raw:
-            args = {}
-        else:
-            try:
-                decoded = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                return None, f"arguments string is not JSON: {exc}"
-            if not isinstance(decoded, Mapping):
-                return None, "arguments string is not a JSON object"
-            args = dict(decoded)
-    elif isinstance(args_value, Mapping):
-        args = dict(args_value)
-    else:
-        return None, "arguments is not an object"
-
-    return {"tool": tool.strip(), "args": args}, ""
+            return {}, ""
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return {}, f"arguments string is not JSON: {exc}"
+        if not isinstance(decoded, Mapping):
+            return {}, "arguments string is not a JSON object"
+        return dict(decoded), ""
+    if isinstance(args_value, Mapping):
+        return dict(args_value), ""
+    return {}, "arguments is not an object"
 
 
 def classify_reply(text: str) -> tuple[str, dict[str, Any] | None, str]:

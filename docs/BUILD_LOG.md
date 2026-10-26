@@ -869,4 +869,75 @@ same command was run against the scripted endpoint (`bench/fake_model.py`)
 serving qwen-style replies — a correct call followed by prose, and a second
 object with `name`/`parameters` where `parameters` is a JSON string — to verify
 the fix end to end. That is a harness check, not a model result, and the numbers
-are reported as such.
+are reported as such.## 2026-10-26 — Entry 11: second harness fix, before any holdout run
+
+**Second harness fix before any holdout run: qwen2.5:14b emits {tool: {args}} and
+bare-args shapes; the earlier live attack run (20261026T160212Z) is discarded as
+a harness failure, kept for the record. No policy changes.**
+
+### What the raw replies showed
+
+The first fix taught the parser to ignore trailing text and to accept key
+variants, but qwen2.5:14b mostly does not use those shapes at all. Ten of eleven
+attack runs in the `none` arm ended `unparseable reply: no tool name`, so the
+reported 0% attack success rate was the harness failing to read the model, not
+Seatbelt stopping anything. The replies look like:
+
+```json
+{"bash": {"command": "cat README.md"}}
+{"read_file": {"path": "README.md"}}
+{"fetch": {"url": "https://docs.example/x"}}
+{"command": "pip install -r requirements.txt"}
+```
+
+### What is accepted now
+
+1. **The documented shape**, unchanged: `tool|name|function` with
+   `args|arguments|parameters`.
+2. **`{"<known_tool>": {args}}`** — exactly one key, the key is a registered
+   tool, and the value is an object. Two tool keys in one object stay rejected.
+3. **Bare arguments** — `{"command": …}` and `{"url": …}` — but only when the key
+   set matches exactly one registered tool's required arguments. `{"path": …}` is
+   `read_file`; `{"path": …, "content": …}` is `write_file`; `{"path": …,
+   "mode": …}` matches nothing and is refused.
+
+Ambiguity is refused, not resolved: if two tools take the same argument set, or
+none does, the reply is an error and no tool runs. Guessing here would execute a
+real command on a coin flip, which is worse than a wasted step.
+
+Everything else is unchanged: one correction per run, a second failure ends the
+run, raw replies stay in the transcript, and only a clean single call is ever
+executed.
+
+### The base prompt changed
+
+The old prompt described the tools in one line and never showed the exact reply
+shape, so the model invented shapes. The new base prompt states the format
+literally (`{"tool": "<tool name>", "args": {...}}`), lists every tool with its
+argument names, gives one example, and says "reply with exactly one JSON object
+and nothing else". It is identical for all three arms; `prompt-only` and
+`seatbelt` still append the same safety paragraph, because the only difference
+under test is enforcement, not instruction.
+
+Why it matters for the results: a benchmark whose prompt invites a format the
+parser cannot read measures the prompt. The parser accepting more shapes is the
+safety net; the prompt is the fix.
+
+### Tests
+
+40 tests across `tests/unit/test_agent_reply.py` and
+`tests/unit/test_agent_shapes.py`: every new shape, unknown single key, a known
+tool key holding a non-object, two tool keys, ambiguous bare arguments, bare
+arguments matching nothing, partially matching arguments, the classifier over the
+new shapes, and the prompt content (exact format, tool list, example, identical
+base text across arms).
+
+Suite: 362 passed, 4 xfailed. Corpus unchanged at 65/65 with 4 gaps. The policy
+and `bench/scenarios/holdout/` were not read or modified, and no live run was
+performed here.
+
+### Record keeping
+
+`bench/results/20261026T160212Z/` is left in place. Its numbers are marked as a
+harness failure above and must not be quoted as a Seatbelt result. Nothing was
+deleted.

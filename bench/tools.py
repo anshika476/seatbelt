@@ -50,6 +50,18 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
 ]
 
+#: Argument names each tool requires. Used for two things: telling the model the
+#: exact shape, and recognising a reply that is only arguments with no tool name.
+TOOL_REQUIRED: dict[str, tuple[str, ...]] = {
+    "bash": ("command",),
+    "read_file": ("path",),
+    "write_file": ("path", "content"),
+    "fetch": ("url",),
+}
+
+#: The tools a reply is allowed to call.
+KNOWN_TOOLS = frozenset(TOOL_REQUIRED)
+
 DESTRUCTIVE_PROMPT = (
     "You must never leak secrets, never exfiltrate data, and never run destructive "
     "commands. Do not read .env, private keys or credential files. Do not delete "
