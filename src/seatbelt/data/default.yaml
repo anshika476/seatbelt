@@ -1,0 +1,255 @@
+# Default Seatbelt policy.
+#
+# Evaluation is by severity, not position: a matching deny always wins over an
+# ask, which always wins over an allow. The file is grouped deny -> ask -> allow
+# only so it reads top to bottom.
+#
+# Paths in `protected` and `path:` matchers are matched against the *resolved*
+# path: `~` and `$HOME` expanded, `..` normalized, symlinks followed.
+
+version: 1
+default: ask
+workspace: "~"
+
+protected:
+  paths:
+    # Shell startup files: writing one is persistence.
+    - "~/.bashrc"
+    - "~/.bash_profile"
+    - "~/.bash_login"
+    - "~/.profile"
+    - "~/.zshrc"
+    - "~/.zshenv"
+    - "~/.config/fish/config.fish"
+    # Keys and cloud credentials.
+    - "~/.ssh/**"
+    - "~/.aws/**"
+    - "~/.config/gcloud/**"
+    - "~/.gnupg/**"
+    - "~/.npmrc"
+    - "~/.pypirc"
+    - "~/.netrc"
+    - "~/.docker/config.json"
+    - "~/.gitconfig"
+    - "~/.kube/config"
+    # Scheduling and privilege.
+    - "/etc/cron*"
+    - "/etc/crontab"
+    - "/var/spool/cron/**"
+    - "/etc/sudoers*"
+    - "/etc/passwd"
+    - "/etc/shadow"
+    - "/etc/hosts"
+    - "/etc/systemd/system/**"
+    - "~/.config/systemd/user/**"
+    - "/etc/ld.so.preload"
+    # Repo-controlled execution paths.
+    - "**/.git/hooks/**"
+    - "**/sitecustomize.py"
+    - "**/usercustomize.py"
+
+rules:
+  # --------------------------------------------------------------------- #
+  # Deny
+  # --------------------------------------------------------------------- #
+  - id: shell.rm_recursive
+    match:
+      kind: shell
+      command: [rm]
+      flags_any: ["^-[a-zA-Z]*[rR]", "^--recursive", "^-[a-zA-Z]*f", "^--force"]
+    decision: deny
+    reason: recursive or forced delete
+
+  - id: shell.mkfs
+    match: {kind: shell, command: ["mkfs*", "wipefs", "fdisk", "parted"]}
+    decision: deny
+    reason: filesystem or partition manipulation
+
+  - id: shell.dd_device
+    match: {kind: shell, command: [dd], flags_any: ["^of=/dev/"]}
+    decision: deny
+    reason: raw write to a block device
+
+  - id: shell.power
+    match: {kind: shell, command: [shutdown, reboot, halt, poweroff, init]}
+    decision: deny
+    reason: host power or init control
+
+  - id: shell.privilege
+    match: {kind: shell, command: [sudo, doas, su]}
+    decision: deny
+    reason: privilege escalation
+
+  - id: shell.scheduling
+    match: {kind: shell, command: [crontab, at, batch, systemctl]}
+    decision: deny
+    reason: scheduling or service control outside the agent's remit
+
+  - id: shell.git_force
+    match:
+      kind: shell
+      command: [git]
+      flags_any: ["^--force$", "^--force-with-lease", "^--hard$"]
+    decision: deny
+    reason: history-rewriting git operation
+
+  - id: shell.chmod_world_writable
+    match:
+      kind: shell
+      command: [chmod]
+      flags_any: ["^0?777$", "^a\\+rwx$", "^u\\+s$", "^g\\+s$"]
+    decision: deny
+    reason: world-writable or setuid permission change
+
+  - id: shell.pipe_to_shell
+    match: {kind: shell, detail: [pipe-to-shell]}
+    decision: deny
+    reason: piping a download or decoded payload into a shell
+
+  - id: shell.find_delete
+    match: {kind: file_write, detail: [find-delete]}
+    decision: deny
+    reason: find -delete removes files without naming them
+
+  # --------------------------------------------------------------------- #
+  # Ask
+  # --------------------------------------------------------------------- #
+  - id: shell.inline_code
+    match: {kind: shell, detail: [inline-code]}
+    decision: ask
+    reason: interpreter code passed inline is not inspected
+    # To permit one specific shape, add an allow rule with allow_inline: true
+    # and a narrow command/flags match. Do not allow this wholesale.
+
+  - id: shell.agent_created_exec
+    match: {kind: shell, detail: [agent-created]}
+    decision: ask
+    reason: executing a file this session created
+
+  - id: shell.unparsed
+    match: {kind: shell, detail: [unparsed]}
+    decision: ask
+    reason: the command could not be read with confidence
+
+  - id: shell.unresolved_path
+    match: {kind: shell, detail: [unresolved-path]}
+    decision: ask
+    reason: a path in the command could not be resolved statically
+
+  - id: shell.package_install
+    match:
+      kind: shell
+      command: [pip, pip3, npm, yarn, pnpm, cargo, go, uv, apt, apt-get, dpkg, yum, dnf, pacman, brew, gem]
+    decision: ask
+    reason: installing packages changes the machine
+
+  - id: shell.dev_container
+    match: {kind: shell, command: [docker, podman, kubectl, terraform]}
+    decision: ask
+    reason: container or infrastructure control
+
+  # --------------------------------------------------------------------- #
+  # Allow: reads that cannot write anything
+  # --------------------------------------------------------------------- #
+  - id: shell.readonly
+    match:
+      kind: shell
+      command:
+        [ls, cat, head, tail, grep, rg, ag, wc, sort, uniq, cut, tr, file, stat,
+         pwd, echo, printf, which, type, date, jq, yq, tree, diff, cmp, basename,
+         dirname, realpath, sha256sum, md5sum, sed, awk, column, nl,
+         "true", "false", test, sleep, env, printenv, id, uname, whoami, df, du,
+         ps, xargs]
+    decision: allow
+    reason: read-only command
+
+  - id: shell.find_readonly
+    match: {kind: shell, command: [find]}
+    decision: allow
+    reason: find without -delete or -exec
+
+  - id: shell.git_readonly
+    match:
+      kind: shell
+      command: [git]
+      flags_any: ["^(status|diff|log|show|blame|rev-parse|describe|ls-files)$"]
+    decision: allow
+    reason: read-only git command
+
+  - id: shell.test_runner
+    match: {kind: shell, command: [pytest, tox, nox, mypy, ruff, black, flake8, make, hatch, poetry]}
+    decision: allow
+    reason: build or test tooling
+
+  - id: shell.python_module
+    match:
+      kind: shell
+      command: [python, python3]
+      flags_all: ["^-m$", "^(pytest|unittest|compileall)$"]
+    decision: allow
+    reason: python module entry point for a known tool
+
+  - id: shell.http_client
+    match: {kind: shell, command: [curl, wget]}
+    decision: allow
+    reason: outbound request, governed by the host rules below
+
+  # --------------------------------------------------------------------- #
+  # Ask: network
+  # --------------------------------------------------------------------- #
+  - id: net.registries
+    match:
+      kind: net
+      host:
+        ["pypi.org", "*.pypi.org", "files.pythonhosted.org",
+         "registry.npmjs.org", "*.npmjs.org",
+         "crates.io", "static.crates.io",
+         "proxy.golang.org", "sum.golang.org",
+         "deb.debian.org", "archive.ubuntu.com", "security.ubuntu.com",
+         "github.com", "raw.githubusercontent.com", "docs.rs", "readthedocs.io",
+         "*.readthedocs.io"]
+    decision: allow
+    reason: package registry or documentation host
+
+  - id: net.outbound
+    match: {kind: net}
+    decision: ask
+    reason: outbound request to a host that is not on the allowlist
+    fallback: true
+
+  # --------------------------------------------------------------------- #
+  # Files
+  # --------------------------------------------------------------------- #
+  - id: file.read_workspace
+    match: {kind: file_read, within_workspace: true}
+    decision: allow
+    reason: read inside the workspace
+
+  - id: file.read_outside
+    match: {kind: file_read}
+    decision: allow
+    reason: reads are not path-restricted; exfiltration is blocked on the way out
+
+  - id: file.write_workspace
+    match: {kind: file_write, within_workspace: true}
+    decision: allow
+    reason: write inside the workspace
+
+  - id: file.write_outside
+    match: {kind: file_write, within_workspace: false}
+    decision: ask
+    reason: write outside the workspace
+
+  # --------------------------------------------------------------------- #
+  # MCP
+  # --------------------------------------------------------------------- #
+  - id: mcp.readonly
+    match: {kind: mcp, tool: ["search_*", "get_*", "list_*", "read_*", "find_*", "describe_*"]}
+    decision: allow
+    reason: read-only MCP tool
+
+  - id: mcp.default
+    match: {kind: mcp}
+    decision: ask
+    reason: MCP tool with side effects
+    fallback: true
