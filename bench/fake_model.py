@@ -26,7 +26,7 @@ def make_handler(replies: Sequence[str]) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
             self.server.last_request = body  # type: ignore[attr-defined]
-            index = min(state["index"], len(replies) - 1)
+            index = state["index"] % len(replies)
             reply = replies[index]
             state["index"] += 1
             payload: dict[str, Any] = {
