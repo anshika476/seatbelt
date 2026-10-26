@@ -339,5 +339,111 @@ Suite: 181 passed, 6 xfailed, 0.78s.
 - `default.yaml` shipped as package data. `bool` YAML gotcha: `true` and `false`
   in a flow list parse as booleans, not command names — the readonly rule failed
   to load until they were quoted.
+## 2026-10-26 — Entry 5: T3, execution and the hook
 
-Next: T3, `seatbelt run` — the first frontend that actually executes.
+### Decision: execute the exact string, not the parse tree
+
+`seatbelt run` passes the original command string to `bash -c` as one argument.
+It would be easy, and wrong, to rebuild a command from the AST: the rebuilt
+string is a second interpretation, and any difference between it and what policy
+inspected is a bypass. Quoting, spacing and operator order reach the shell
+exactly as they reached the parser.
+
+Bash specifically, not `/bin/sh`, because the parser's `-c` and wrapper handling
+assumes bash. Running the checked string under a different shell would recreate
+the same disagreement from the other side.
+
+### Containment around the call
+
+- `cwd` is the declared workspace, so a relative path means what policy resolved.
+- `child_env()` strips every `SEATBELT_*` variable. This moved into the runner
+  rather than the CLI after a test proved the point: the CLI was stripping it,
+  but any other caller of `execute()` would not have been. The guarantee belongs
+  where the process is spawned, not where the arguments are parsed.
+- stdout/stderr go to temporary files and are read back capped (64 KiB per
+  stream by default), so a command printing a gigabyte cannot exhaust memory.
+- `start_new_session=True` plus `killpg` on timeout, because a plain `kill` of
+  `bash` leaves grandchildren holding the pipes — a test with `sleep 30 & wait`
+  pins this.
+- stdin is `/dev/null`; a command cannot block waiting for a password prompt.
+
+### Decision: ask without a human is a deny
+
+`run` has no harness to prompt, so an `ask` verdict with no TTY becomes a refusal
+with exit 126 and a reason that says so. The hook is the opposite case: it
+returns `ask` in JSON and lets Claude Code prompt, because the harness owns the
+human. Same policy, different frontend capability — that distinction is worth
+keeping explicit rather than papering over with a global `--yes`.
+
+### Decision: audit after execution, and say what that costs
+
+The record carries the verdict, rule id, exit code and duration, so it can only
+be written after the command returns. The cost: a `kill -9` of the guardian
+mid-command loses the record for that run. The alternative — two records per run
+(start, then result) — makes the log noisier and the benchmark harder to read
+for a failure mode that already requires killing the guardian. Recorded as a
+limitation below rather than fixed.
+
+### Two surprises worth writing down
+
+1. **A 32-character hex key is valid base64.** `key_from_env` preferred hex only
+   at exactly 64 characters, so a 32-character test key silently decoded through
+   the base64 path into 24 different bytes. Verification then failed with "seal
+   does not match" and looked like a chain bug. Tests now use 64 hex characters
+   and derive the expected key with `bytes.fromhex`.
+2. **`python` is not `python3`** on this host, so an execution test asserting
+   exit 0 got 127 from bash. The policy treats both names as inline code, but
+   only one exists in `PATH`.
+
+### Gaps fixed (6 -> 4)
+
+- **Download then run.** `curl -o FILE` and `wget -O FILE` write a file without a
+  shell redirect. The target is now collected *before* evaluation, so
+  `curl -o /tmp/x.sh … && /tmp/x.sh` is recognised as running the file it just
+  downloaded, and `.x.sh` also gets a write probe.
+- **Remote copy egress.** `rsync` and `scp` destinations are parsed into hosts.
+  The tokenizer splits `user@host:/path` at the colon, so the host is recovered
+  from the token before a lone `:`; a quoted destination keeps its colon.
+
+Both were recorded as expected `deny` and both are now expected `ask`. That is
+the honest change, not a weakening: the destination is a question for a human,
+and a hard deny on every `rsync` would be wrong for legitimate use. The fixtures
+assert `ask` with a specific rule, so the behaviour is still pinned.
+
+Fixing these required `file.write_outside` to become a `fallback` rule. At equal
+severity a specific finding (`shell.agent_created_exec`, `net.outbound`) should
+explain the outcome rather than the generic "write outside the workspace", which
+otherwise won every tie because it is written earlier.
+
+### Not production-safe yet, on purpose
+
+`--yes` auto-approves every `ask`. It exists for the demo and the benchmark. It
+is not an approval policy, and it is not what a user should put in a wrapper
+script.
+
+### Remaining known gaps (4)
+
+| Gap | Fixture | Why |
+| --- | --- | --- |
+| Symlink to a protected tree | `gap_symlink_to_ssh` | `ln -sfn ~/.ssh /tmp/link` writes a link, not the tree |
+| Git config persistence | `gap_git_hooks_path` | `git config core.hooksPath` is not modelled |
+| `chmod +s` | `gap_chmod_plus_s` | setuid written without a `u`/`g` prefix |
+| Editor writes | `gap_editor_write` | `vim ~/.bashrc` writes through a process Seatbelt never sees |
+
+Additional limitations without a fixture, because they cannot be expressed as a
+single command:
+
+- A `kill -9` of the guardian between execution and audit loses that record.
+- The hook depends on the harness honouring either `permissionDecision` or exit
+  code 2. A harness that ignores both is unguarded; that is a property of the
+  integration, and the README says so.
+- `run` executes one command line. An agent that starts a long-lived server and
+  then talks to it through avenues Seatbelt does not see is outside the model.
+
+### Counts
+
+- 65 corpus fixtures, 4 known gaps (all strict xfail): 31 deny, 13 ask, 13 allow,
+  and 8 that expect `ask` because of these fixes.
+- 234 tests passing, 4 xfailed, ~4s including subprocess-level `run` tests.
+
+Next: T4, the benchmark harness and `make demo`.

@@ -263,6 +263,7 @@ class Policy:
         self.protected = tuple(protected)
         self.workspace = workspace
         self.source = source
+        self._by_id = {rule.id: rule for rule in rules}
         ids = [rule.id for rule in self.rules]
         duplicates = {rule_id for rule_id in ids if ids.count(rule_id) > 1}
         if duplicates:
@@ -307,6 +308,15 @@ class Policy:
         )
 
     # -- evaluation ------------------------------------------------------- #
+
+    def is_fallback(self, rule_id: str) -> bool:
+        """True when ``rule_id`` is a catch-all rather than a specific rule.
+
+        Used when merging probe verdicts: at equal severity a specific rule
+        explains the outcome better than "anything else is a question".
+        """
+        rule = self._by_id.get(rule_id)
+        return bool(rule and rule.fallback)
 
     def protected_match(self, path: str, ctx: EvalContext) -> str | None:
         """Return the pattern that protects ``path``, if any.

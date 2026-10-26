@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy into .claude/settings.json (project) or ~/.claude/settings.json (user). `seatbelt` must be on PATH.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "seatbelt hook"
+          }
+        ]
+      }
+    ]
+  }
+}

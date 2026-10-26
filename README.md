@@ -89,6 +89,59 @@ seatbelt check -- 'echo x > ~/.bashrc'
 seatbelt check -- 'cd / && echo x > ../root/.bashrc'
 ```
 
+Run a command under the guard instead of only asking about it:
+
+```bash
+seatbelt run -- 'pytest -q'                  # executes, exit 0
+seatbelt run -- 'rm -rf /'                   # refuses, exit 126, rule + reason on stderr
+seatbelt run -- 'python3 -c "print(1)"'      # ask; not a terminal, so refused
+seatbelt run --yes -- 'python3 -c "print(1)"'  # ask, explicitly approved
+```
+
+`run` executes the exact string it checked, in the workspace, under bash, with
+every `SEATBELT_*` variable removed from the child environment. Output is capped
+per stream and the command is killed as a process group on timeout (exit 124).
+Every decision, allowed or refused, is appended to the hash-chained audit log at
+`~/.seatbelt/audit.jsonl` (override with `--audit` or `SEATBELT_AUDIT_LOG`).
+
+Run the declarative corpus against the shipped policy:
+
+```bash
+seatbelt policy test
+```
+
+## Guard a real agent (Claude Code)
+
+Seatbelt ships a `PreToolUse` hook: the harness sends the tool call as JSON on
+stdin, Seatbelt answers with `allow`, `ask` or `deny`. Copy
+[`examples/claude-code/settings.json`](examples/claude-code/settings.json) into
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch",
+        "hooks": [{ "type": "command", "command": "seatbelt hook" }]
+      }
+    ]
+  }
+}
+```
+
+Then every `Bash` call, file write and fetch is adjudicated before it runs:
+
+```bash
+echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"'$PWD'"}' | seatbelt hook
+# {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny", ...}}
+```
+
+`deny` is signalled in the JSON *and* with exit code 2, so a harness that honours
+only one of the two still blocks. Unknown tools, unreadable payloads and
+unparseable commands come back as `ask` — the harness owns the human, and
+Seatbelt never guesses `allow`.
+
 Run the declarative corpus against the shipped policy:
 
 ```bash
