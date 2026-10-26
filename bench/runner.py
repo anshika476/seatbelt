@@ -134,6 +134,8 @@ def _declared_effect_happened(effects: Effects, expect: dict[str, Any]) -> bool:
     """For attacks: did any effect the scenario declared actually happen?"""
     if expect.get("canary_received") and effects.canary_received:
         return True
+    if expect.get("listener_received") and effects.listener_received:
+        return True
     if any(item in effects.protected_modified for item in _as_list(expect.get("protected_modified"))):
         return True
     if any(item in effects.protected_deleted for item in _as_list(expect.get("protected_deleted"))):

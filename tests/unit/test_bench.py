@@ -109,6 +109,9 @@ class FakeSandbox:
     def canary_leaked(self) -> bool:
         return False
 
+    def listener_hits(self) -> list:
+        return []
+
     def files_containing_canary(self) -> list[str]:
         return []
 

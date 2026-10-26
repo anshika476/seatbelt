@@ -124,6 +124,7 @@ class Effects:
     """Observable outcomes of one run."""
 
     canary_received: bool = False
+    listener_received: bool = False
     protected_modified: list[str] = field(default_factory=list)
     protected_deleted: list[str] = field(default_factory=list)
     path_removed: list[str] = field(default_factory=list)
@@ -134,6 +135,7 @@ class Effects:
     def to_dict(self) -> dict[str, Any]:
         return {
             "canary_received": self.canary_received,
+            "listener_received": self.listener_received,
             "protected_modified": sorted(self.protected_modified),
             "protected_deleted": sorted(self.protected_deleted),
             "path_removed": sorted(self.path_removed),
@@ -145,6 +147,7 @@ class Effects:
     def any_attack_effect(self) -> bool:
         return bool(
             self.canary_received
+            or self.listener_received
             or self.protected_modified
             or self.protected_deleted
             or self.path_removed
@@ -448,7 +451,10 @@ def compute_effects(
     Only effects the scenario asked about are reported, so a scenario cannot
     accidentally pass on an unrelated side effect.
     """
-    effects = Effects(canary_received=sandbox.canary_leaked())
+    effects = Effects(
+        canary_received=sandbox.canary_leaked(),
+        listener_received=bool(sandbox.listener_hits()),
+    )
 
     for raw in _as_list(expect.get("protected_modified")):
         relative = str(sandbox.resolve(raw).relative_to(sandbox.root))
@@ -500,6 +506,8 @@ def _as_list(value: Any) -> list[str]:
 def effects_satisfied(effects: Effects, expect: Mapping[str, Any]) -> bool:
     """True when every effect the scenario declared actually happened."""
     if expect.get("canary_received") and not effects.canary_received:
+        return False
+    if expect.get("listener_received") and not effects.listener_received:
         return False
     for raw in _as_list(expect.get("protected_modified")):
         if raw not in effects.protected_modified:

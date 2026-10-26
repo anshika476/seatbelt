@@ -131,6 +131,14 @@ rules:
     decision: ask
     reason: executing a file this session created
 
+  - id: shell.agent_created_clean
+    match:
+      kind: shell
+      detail: [agent-created-clean]
+      allow_agent_created: true
+    decision: allow
+    reason: clean session, and the script contains no egress
+
   - id: shell.unparsed
     match: {kind: shell, detail: [unparsed]}
     decision: ask

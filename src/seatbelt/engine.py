@@ -57,6 +57,47 @@ DOWNLOAD_FLAGS = {
 #: Commands that copy to a remote host over the network.
 REMOTE_COPY_COMMANDS = frozenset({"rsync", "scp"})
 
+#: Patterns that make a script more than inert when it is run.
+#:
+#: This is a screen, not a sandbox. It exists so a session that has read nothing
+#: hostile can edit-and-run its own small scripts without a human in the loop,
+#: while anything that reaches for the network or for credentials still asks.
+EGRESS_INDICATORS = (
+    "http://",
+    "https://",
+    "urllib",
+    "requests",
+    "httpx",
+    "socket",
+    "http.client",
+    "subprocess",
+    "os.system",
+    "popen",
+    "curl",
+    "wget",
+    "b64decode",
+    "base64",
+    ".env",
+    "id_rsa",
+    ".ssh",
+    "os.environ",
+    "getenv",
+    "open(",
+)
+
+
+def looks_inert(contents: str) -> bool:
+    """True when a script contains nothing that could move data out.
+
+    Conservative on purpose: no captured contents means "not inert", so a file
+    created by a shell redirect is still a question.
+    """
+    if not contents.strip():
+        return False
+    lowered = contents.lower()
+    return not any(indicator in lowered for indicator in EGRESS_INDICATORS)
+
+
 #: Commands that put data on the wire. Used only to decide whether a shell
 #: command is an egress candidate worth scanning for secrets and taint.
 EGRESS_COMMANDS = frozenset(
@@ -293,6 +334,21 @@ class Engine:
             name = os.path.basename(action.target)
             if name == ".env" or name.startswith(".env."):
                 self.ctx.secrets.discover_dotenv(action.target)
+            if self._is_secret_path(action.target):
+                # The agent has now seen a credential. Everything it writes
+                # afterwards is suspect, and its own scripts stop being trusted.
+                self.ctx.secret_read = True
+
+    def _is_secret_path(self, path: str) -> bool:
+        name = os.path.basename(path)
+        if name == ".env" or name.startswith(".env."):
+            return True
+        if self.ctx.secrets is None:
+            return False
+        resolved = os.path.realpath(path)
+        return any(
+            resolved == protected for _, protected in self.ctx.secrets.protected_paths
+        )
 
     def _egress_probes(self, action: Action) -> list[Probe]:
         """Look for secrets and tainted text in what is about to leave."""
@@ -375,6 +431,7 @@ class Engine:
                     resolved,
                     detail="file",
                     resolved=resolved,
+                    contents=str(action.args.get("contents") or ""),
                 )
             ]
         if action.kind is ToolKind.NET:
@@ -443,7 +500,12 @@ class Engine:
         if not name:
             return []
 
-        probes = [Probe(ToolKind.SHELL, name, argv=argv, detail="command")]
+        probes: list[Probe] = []
+        # Placed first so that when a verdict is a tie, "this is a file the
+        # session created" explains the outcome rather than the generic command
+        # rule that happens to be checked first.
+        probes.extend(self._agent_created_probes(name, argv, command, downloads))
+        probes.append(Probe(ToolKind.SHELL, name, argv=argv, detail="command"))
 
         if name in INTERPRETERS and _has_inline_flag(name, argv):
             probes.append(
@@ -493,8 +555,6 @@ class Engine:
             root = _first_non_flag(argv[1:]) or "."
             probes.extend(self._path_probes(root, "find-delete"))
 
-        probes.extend(self._agent_created_probes(name, argv, command, downloads))
-
         return probes
 
     def _agent_created_probes(
@@ -528,12 +588,21 @@ class Engine:
         for candidate in candidates:
             resolved, _ = resolve_path(candidate, self.ctx)
             if resolved and resolved in available:
+                # A clean session may run its own small scripts. Anything that
+                # can reach the network or a credential still asks, and a session
+                # that has read untrusted text or a secret loses the allowance.
+                contents = self.ctx.created_contents.get(resolved, "")
+                detail = (
+                    "agent-created-clean"
+                    if self.ctx.clean_session and looks_inert(contents)
+                    else "agent-created"
+                )
                 probes.append(
                     Probe(
                         ToolKind.SHELL,
                         candidate,
                         argv=argv,
-                        detail="agent-created",
+                        detail=detail,
                         agent_created=True,
                     )
                 )
@@ -567,6 +636,10 @@ class Engine:
             if probe.kind is ToolKind.FILE_WRITE and verdict.decision is Decision.ALLOW:
                 if probe.resolved:
                     self.ctx.created_files.add(probe.resolved)
+                    if probe.contents:
+                        # Remembered so that running this file later can be
+                        # judged on what it actually contains.
+                        self.ctx.created_contents[probe.resolved] = probe.contents
 
         # Highest severity wins. On a tie, a specific rule explains the outcome
         # better than the policy default or a catch-all fallback, so it wins;

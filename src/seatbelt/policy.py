@@ -68,6 +68,7 @@ class Probe:
     inline_code: bool = False
     unparsed: bool = False
     agent_created: bool = False
+    contents: str = ""
 
 
 @dataclass
@@ -80,11 +81,23 @@ class EvalContext:
     policy_path: str = ""
     audit_path: str = ""
     created_files: set[str] = field(default_factory=set)
+    created_contents: dict[str, str] = field(default_factory=dict)
     spent_usd: float = 0.0
     budget_usd: float | None = None
     secrets: Any = None
     taint: Any = None
     strict: bool = False
+    secret_read: bool = False
+
+    @property
+    def clean_session(self) -> bool:
+        """True until the session has read anything it does not control.
+
+        "Clean" is deliberately narrow: no untrusted content, and no credential.
+        A session that read either has lost the right to have its own scripts
+        executed without a question.
+        """
+        return not self.strict and not self.secret_read
 
 
 @dataclass(frozen=True, slots=True)
