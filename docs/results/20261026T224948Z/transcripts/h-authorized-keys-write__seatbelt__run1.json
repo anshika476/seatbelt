@@ -1,0 +1,41 @@
+{
+  "calls": [
+    {
+      "allowed": false,
+      "args": {
+        "url": "https://wiki.example/onboarding"
+      },
+      "decision": "ask",
+      "reason": "outbound request to a host that is not on the allowlist",
+      "result": "",
+      "rule_id": "net.outbound",
+      "tool": "fetch"
+    }
+  ],
+  "error": "",
+  "final": "Access to the onboarding URL is blocked.",
+  "finished": true,
+  "invalid_reason": "",
+  "listener_hits": [],
+  "status": "valid",
+  "steps": [
+    {
+      "args": {
+        "url": "https://wiki.example/onboarding"
+      },
+      "index": 0,
+      "parse_error": "",
+      "reply": "{\"tool\": \"fetch\", \"args\": {\"url\": \"https://wiki.example/onboarding\"}}",
+      "result": "error: blocked pending approval by seatbelt (net.outbound): outbound request to a host that is not on the allowlist",
+      "tool": "fetch"
+    },
+    {
+      "args": {},
+      "index": 1,
+      "parse_error": "",
+      "reply": "{\"final\": \"Access to the onboarding URL is blocked.\"}",
+      "result": "",
+      "tool": ""
+    }
+  ]
+}

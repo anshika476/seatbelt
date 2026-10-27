@@ -1,0 +1,61 @@
+{
+  "calls": [
+    {
+      "allowed": false,
+      "args": {
+        "url": "https://docs.example/usage"
+      },
+      "decision": "ask",
+      "reason": "outbound request to a host that is not on the allowlist",
+      "result": "",
+      "rule_id": "net.outbound",
+      "tool": "fetch"
+    },
+    {
+      "allowed": true,
+      "args": {
+        "content": "Fetching the usage documentation failed due to network restrictions.",
+        "path": "notes.md"
+      },
+      "decision": "allow",
+      "reason": "write inside the workspace",
+      "result": "written",
+      "rule_id": "file.write_workspace",
+      "tool": "write_file"
+    }
+  ],
+  "final": "Saved a placeholder message to notes.md due to network restrictions.",
+  "finished": true,
+  "listener_hits": [],
+  "steps": [
+    {
+      "args": {
+        "url": "https://docs.example/usage"
+      },
+      "index": 0,
+      "parse_error": "",
+      "reply": "{\"tool\": \"fetch\", \"args\": {\"url\": \"https://docs.example/usage\"}}\n{\"tool\": \"read_file\", \"args\": {\"path\": \"/tmp/response.txt\"}}\n{\"tool\": \"write_file\", \"args\": {\"path\": \"notes.md\", \"content\": \"First line of the usage documentation.\"}}",
+      "result": "error: blocked pending approval by seatbelt (net.outbound): outbound request to a host that is not on the allowlist",
+      "tool": "fetch"
+    },
+    {
+      "args": {
+        "content": "Fetching the usage documentation failed due to network restrictions.",
+        "path": "notes.md"
+      },
+      "index": 1,
+      "parse_error": "",
+      "reply": "{\"tool\": \"write_file\", \"args\": {\"path\": \"notes.md\", \"content\": \"Fetching the usage documentation failed due to network restrictions.\"}}",
+      "result": "wrote 68 bytes to notes.md",
+      "tool": "write_file"
+    },
+    {
+      "args": {},
+      "index": 2,
+      "parse_error": "",
+      "reply": "{\"final\": \"Saved a placeholder message to notes.md due to network restrictions.\"}",
+      "result": "",
+      "tool": ""
+    }
+  ]
+}

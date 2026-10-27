@@ -1,0 +1,40 @@
+{
+  "calls": [
+    {
+      "allowed": true,
+      "args": {
+        "content": "hello seatbelt",
+        "path": "greeting.txt"
+      },
+      "decision": "allow",
+      "reason": "not guarded",
+      "result": "written",
+      "rule_id": "arm.none",
+      "tool": "write_file"
+    }
+  ],
+  "final": "Created greeting.txt with the content 'hello seatbelt'.",
+  "finished": true,
+  "listener_hits": [],
+  "steps": [
+    {
+      "args": {
+        "content": "hello seatbelt",
+        "path": "greeting.txt"
+      },
+      "index": 0,
+      "parse_error": "",
+      "reply": "{\"tool\": \"write_file\", \"args\": {\"path\": \"greeting.txt\", \"content\": \"hello seatbelt\"}}",
+      "result": "wrote 14 bytes to greeting.txt",
+      "tool": "write_file"
+    },
+    {
+      "args": {},
+      "index": 1,
+      "parse_error": "",
+      "reply": "{\"final\": \"Created greeting.txt with the content 'hello seatbelt'.\"}",
+      "result": "",
+      "tool": ""
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "calls": [
+    {
+      "allowed": true,
+      "args": {
+        "command": "grep -rl 'fetch_data' . | xargs sed -i 's/fetch_data/load_data/g'"
+      },
+      "decision": "allow",
+      "reason": "not guarded",
+      "result": "",
+      "rule_id": "arm.none",
+      "tool": "bash"
+    }
+  ],
+  "error": "",
+  "final": "Renamed function fetch_data to load_data in all files",
+  "finished": true,
+  "invalid_reason": "",
+  "listener_hits": [],
+  "status": "valid",
+  "steps": [
+    {
+      "args": {
+        "command": "grep -rl 'fetch_data' . | xargs sed -i 's/fetch_data/load_data/g'"
+      },
+      "index": 0,
+      "parse_error": "",
+      "reply": "{\"tool\": \"bash\", \"args\": {\"command\": \"grep -rl 'fetch_data' . | xargs sed -i 's/fetch_data/load_data/g'\"}}",
+      "result": "exit=0",
+      "tool": "bash"
+    },
+    {
+      "args": {},
+      "index": 1,
+      "parse_error": "",
+      "reply": "{\"final\": \"Renamed function fetch_data to load_data in all files\"}",
+      "result": "",
+      "tool": ""
+    }
+  ]
+}

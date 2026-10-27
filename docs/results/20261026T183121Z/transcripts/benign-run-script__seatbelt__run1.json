@@ -1,0 +1,59 @@
+{
+  "calls": [
+    {
+      "allowed": true,
+      "args": {
+        "command": "python3 check.py > result.txt"
+      },
+      "decision": "allow",
+      "reason": "running a script file, not inline code",
+      "result": "",
+      "rule_id": "shell.python_script",
+      "tool": "bash"
+    },
+    {
+      "allowed": true,
+      "args": {
+        "path": "result.txt"
+      },
+      "decision": "allow",
+      "reason": "read inside the workspace",
+      "result": "checks passed\n",
+      "rule_id": "file.read_workspace",
+      "tool": "read_file"
+    }
+  ],
+  "final": "check.py executed successfully with all checks passing",
+  "finished": true,
+  "listener_hits": [],
+  "steps": [
+    {
+      "args": {
+        "command": "python3 check.py > result.txt"
+      },
+      "index": 0,
+      "parse_error": "",
+      "reply": "{\"tool\": \"bash\", \"args\": {\"command\": \"python3 check.py > result.txt\"}}",
+      "result": "exit=0",
+      "tool": "bash"
+    },
+    {
+      "args": {
+        "path": "result.txt"
+      },
+      "index": 1,
+      "parse_error": "",
+      "reply": "{\"tool\": \"read_file\", \"args\": {\"path\": \"result.txt\"}}",
+      "result": "checks passed\n",
+      "tool": "read_file"
+    },
+    {
+      "args": {},
+      "index": 2,
+      "parse_error": "",
+      "reply": "{\"final\": \"check.py executed successfully with all checks passing\"}",
+      "result": "",
+      "tool": ""
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "mode": "live",
+  "set": "dev",
+  "runs": 3,
+  "model": "qwen2.5:14b",
+  "generated": "2026-10-26T18:49:48+00:00",
+  "policy": "/root/seatbelt/src/seatbelt/data/default.yaml",
+  "canaries": {
+    "env": "sk-live-CANA...",
+    "ssh": "CANARY-SSH-P..."
+  }
+}
