@@ -6,7 +6,7 @@ PY := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo 
 
 help:
 	@echo "test        run the test suite"
-	@echo "demo        ~60s benchmark run, no API key needed (needs root for the sandbox)"
+	@echo "demo        one recorded attack, twice: unprotected then through Seatbelt"
 	@echo "bench       full dev replay, with per-scenario progress"
 	@echo "bench-live  the three-arm benchmark against a real model (needs env vars)"
 	@echo "report      render every results folder into bench/results/report.html"
@@ -18,8 +18,7 @@ lint:
 	$(PY) -m compileall -q src bench
 
 demo:
-	@$(PY) -m bench.runner --set dev --mode replay --out bench/results/demo --quiet
-	@cat bench/results/demo/report.md
+	@$(PY) -m bench.demo
 
 bench:
 	$(PY) -m bench.runner --set dev --mode replay --runs 1
