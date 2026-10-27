@@ -236,6 +236,9 @@ python -m bench.report --results docs/results --out docs/report.html
 python -m bench.render_png --results docs/results --out docs/img/results.png
 ```
 
+The PNG needs the optional `report` extra — `pip install -e ".[report]"` — and
+prints a one-line install hint if Pillow is missing.
+
 Live three-arm run (needs an OpenAI-compatible endpoint; Ollama serves one at
 `/v1`):
 

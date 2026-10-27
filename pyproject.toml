@@ -24,6 +24,8 @@ dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Only needed for `python -m bench.render_png`, which draws docs/img/results.png.
+report = ["pillow>=10.0"]
 
 [project.scripts]
 seatbelt = "seatbelt.cli:main"

@@ -2,6 +2,10 @@
 
     python -m bench.render_png --results docs/results --out docs/img/results.png
 
+Pillow is an optional extra, not a core dependency: this command is the only
+thing in the project that needs it. Install with ``pip install -e ".[report]"``.
+Missing Pillow is reported as a one-line message, not an ImportError.
+
 No browser: the image is drawn from the same `results.csv` and `transcripts/`
 that the HTML report reads, so it cannot show a number the data does not contain.
 The headline uses the first live holdout run for attacks and the first run that
@@ -19,9 +23,19 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-from PIL import Image, ImageDraw, ImageFont
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # optional extra; reported by main() instead of crashing
+    Image = None  # type: ignore[assignment]
+    ImageDraw = None  # type: ignore[assignment]
+    ImageFont = None  # type: ignore[assignment]
 
 from .report import RunSet, aggregate, discover
+
+MISSING_PILLOW = (
+    'render_png: Pillow is required for this command; install it with: '
+    'pip install -e ".[report]"'
+)
 
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
 
@@ -251,6 +265,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--results", default="docs/results")
     parser.add_argument("--out", default="docs/img/results.png")
     args = parser.parse_args(argv)
+
+    if Image is None:
+        # One line, on stderr, with the fix in it. No traceback for a missing
+        # optional extra.
+        print(MISSING_PILLOW, file=sys.stderr)
+        return 2
 
     runsets = discover(Path(args.results))
     if not runsets:
